@@ -128,17 +128,18 @@ void main() {
 }
 `;
 
+const MAX_GPU_RAMP_RECTS = 128;
+
 const GENERATIVE_GRID_VERT_SOURCE = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
-precision highp usampler2D;
 
 layout(location = 0) in vec2 a_corner;
 
 uniform sampler2D  u_fieldTex;
 uniform sampler2D  u_colorTex;
-uniform usampler2D u_rampLutTex;
+uniform vec4       u_rampUvRects[128];
 
 uniform vec2  u_viewportPx;
 uniform vec2  u_cellSizePx;
@@ -171,10 +172,11 @@ void main() {
   float paletteIdx = cellField.b;
   float alpha = cellField.a;
 
+  int rampCount = min(u_rampLen, 124);
   int glyphIdx = -1;
   uint flags = u_invertFlag;
 
-  if (alpha > 0.005 && u_rampLen > 0) {
+  if (alpha > 0.005 && rampCount > 0) {
     bool useDirectional =
       u_allowDirectional > 0.5 &&
       lum >= u_directionalMinLum &&
@@ -183,14 +185,14 @@ void main() {
     if (useDirectional) {
       float wrapped = mod(mod(angle, 3.14159265) + 3.14159265, 3.14159265);
       int bin = int(floor(wrapped / 0.78539816 + 0.5)) & 3;
-      glyphIdx = u_rampLen + bin;
+      glyphIdx = rampCount + bin;
       flags |= 262144u;
     } else {
-      glyphIdx = clamp(int(floor(lum * float(u_rampLen))), 0, u_rampLen - 1);
+      glyphIdx = clamp(int(floor(lum * float(rampCount))), 0, rampCount - 1);
     }
   }
 
-  if (glyphIdx < 0 || (glyphIdx == 0 && u_firstRampIsSpace > 0.5)) {
+  if (glyphIdx < 0 || glyphIdx >= 128 || (glyphIdx == 0 && u_firstRampIsSpace > 0.5)) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     v_uv = vec2(0.0);
     v_uvBounds = vec4(0.0);
@@ -200,8 +202,7 @@ void main() {
     return;
   }
 
-  uvec4 rectNorm = texelFetch(u_rampLutTex, ivec2(glyphIdx, 0), 0);
-  vec4 glyphUvRect = vec4(rectNorm) / 65535.0;
+  vec4 glyphUvRect = u_rampUvRects[glyphIdx];
 
   vec2 snappedCell = max(vec2(1.0), floor(u_cellSizePx + 0.5));
   vec2 snappedOrigin = vec2(float(col), float(row)) * snappedCell;
@@ -583,14 +584,13 @@ export class WebGLInstancedRenderer {
 
   private generativeProgram: WebGLProgram | null = null;
   private generativeVao: WebGLVertexArrayObject | null = null;
-  private rampLutTex: WebGLTexture | null = null;
-  private rampLutU16 = new Uint16Array(0);
+  private rampUvF32 = new Float32Array(MAX_GPU_RAMP_RECTS * 4);
   private lastRampCacheKey = '';
 
   private ugAtlasTex: WebGLUniformLocation | null = null;
   private ugFieldTex: WebGLUniformLocation | null = null;
   private ugColorTex: WebGLUniformLocation | null = null;
-  private ugRampLutTex: WebGLUniformLocation | null = null;
+  private ugRampUvRects: WebGLUniformLocation | null = null;
   private ugViewportPx: WebGLUniformLocation | null = null;
   private ugCellSizePx: WebGLUniformLocation | null = null;
   private ugGridCols: WebGLUniformLocation | null = null;
@@ -636,7 +636,6 @@ export class WebGLInstancedRenderer {
     this.generativeVao = null;
     this.backdropProgram = null;
     this.backdropTex = null;
-    this.rampLutTex = null;
     this.lastRampCacheKey = '';
     this.lastAtlas?.invalidateTexture();
     if (!this.fallback2d) {
@@ -944,9 +943,9 @@ export class WebGLInstancedRenderer {
     } = options;
 
     this.lastAtlas = atlas;
+    this.syncRampUniformBuffer(gl, atlas, rampChars);
     const atlasTex = atlas.syncTexture(gl);
-    const rampLutTex = this.syncRampLutTexture(gl, atlas, rampChars);
-    if (!atlasTex || !rampLutTex) return;
+    if (!atlasTex) return;
 
     const metrics = atlas.getMetrics();
     const width = this.canvas.width;
@@ -978,9 +977,9 @@ export class WebGLInstancedRenderer {
     gl.bindTexture(gl.TEXTURE_2D, colorTex);
     gl.uniform1i(this.ugColorTex, 2);
 
-    gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, rampLutTex);
-    gl.uniform1i(this.ugRampLutTex, 3);
+    if (this.ugRampUvRects) {
+      gl.uniform4fv(this.ugRampUvRects, this.rampUvF32);
+    }
 
     gl.uniform2f(this.ugViewportPx, width, height);
     gl.uniform2f(this.ugCellSizePx, metrics.cellWidthPx, metrics.cellHeightPx);
@@ -1025,7 +1024,6 @@ export class WebGLInstancedRenderer {
       if (this.generativeVao) gl.deleteVertexArray(this.generativeVao);
       if (this.backdropProgram) gl.deleteProgram(this.backdropProgram);
       if (this.backdropTex) gl.deleteTexture(this.backdropTex);
-      if (this.rampLutTex) gl.deleteTexture(this.rampLutTex);
       if (this.quadVbo) gl.deleteBuffer(this.quadVbo);
       if (this.instanceVbo) gl.deleteBuffer(this.instanceVbo);
     }
@@ -1036,76 +1034,46 @@ export class WebGLInstancedRenderer {
     this.generativeVao = null;
     this.backdropProgram = null;
     this.backdropTex = null;
-    this.rampLutTex = null;
     this.lastRampCacheKey = '';
     this.quadVbo = null;
     this.instanceVbo = null;
     this.gl = null;
   }
 
-  private syncRampLutTexture(
+  private syncRampUniformBuffer(
     gl: WebGL2RenderingContext,
     atlas: GlyphAtlas,
     rampChars: readonly string[]
-  ): WebGLTexture | null {
+  ): void {
     const metrics = atlas.getMetrics();
+    const clampedRampLen = Math.min(124, rampChars.length);
+    const totalEntries = clampedRampLen + 4;
     const key = `${metrics.fontFamily}|${metrics.cellWidthPx}x${metrics.cellHeightPx}|${metrics.atlasWidth}x${metrics.atlasHeight}|${rampChars.join('')}`;
-    const totalEntries = rampChars.length + 4;
 
-    if (!this.rampLutTex) {
-      this.rampLutTex = gl.createTexture();
-      if (!this.rampLutTex) return null;
-      this.lastRampCacheKey = '';
+    if (key === this.lastRampCacheKey) {
+      return;
     }
 
-    if (key === this.lastRampCacheKey && this.rampLutU16.length >= totalEntries * 4) {
-      return this.rampLutTex;
-    }
-
-    if (this.rampLutU16.length < totalEntries * 4) {
-      this.rampLutU16 = new Uint16Array(totalEntries * 4);
-    }
-
+    this.rampUvF32.fill(0);
     const dirGlyphs = ['|', '/', '-', '\\'] as const;
     for (let i = 0; i < totalEntries; i += 1) {
-      const ch = i < rampChars.length ? (rampChars[i] ?? ' ') : (dirGlyphs[i - rampChars.length] ?? '|');
+      const ch =
+        i < clampedRampLen
+          ? (rampChars[i] ?? ' ')
+          : (dirGlyphs[i - clampedRampLen] ?? '|');
       const slot = atlas.getOrInsertGlyph(ch);
       const b = i * 4;
       if (slot) {
-        this.rampLutU16[b] = slot.u0Norm;
-        this.rampLutU16[b + 1] = slot.v0Norm;
-        this.rampLutU16[b + 2] = slot.uWNorm;
-        this.rampLutU16[b + 3] = slot.vHNorm;
-      } else {
-        this.rampLutU16[b] = 0;
-        this.rampLutU16[b + 1] = 0;
-        this.rampLutU16[b + 2] = 0;
-        this.rampLutU16[b + 3] = 0;
+        this.rampUvF32[b] = slot.u0Norm / 65535;
+        this.rampUvF32[b + 1] = slot.v0Norm / 65535;
+        this.rampUvF32[b + 2] = slot.uWNorm / 65535;
+        this.rampUvF32[b + 3] = slot.vHNorm / 65535;
       }
     }
 
     // Re-sync atlas in case missing glyphs were inserted lazily while packing LUT.
     atlas.syncTexture(gl);
-
-    gl.bindTexture(gl.TEXTURE_2D, this.rampLutTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.RGBA16UI,
-      totalEntries,
-      1,
-      0,
-      gl.RGBA_INTEGER,
-      gl.UNSIGNED_SHORT,
-      this.rampLutU16.subarray(0, totalEntries * 4)
-    );
-
     this.lastRampCacheKey = key;
-    return this.rampLutTex;
   }
 
   private drawBackdropQuad(
@@ -1299,7 +1267,7 @@ export class WebGLInstancedRenderer {
     this.ugAtlasTex = gl.getUniformLocation(genProgram, 'u_atlasTex');
     this.ugFieldTex = gl.getUniformLocation(genProgram, 'u_fieldTex');
     this.ugColorTex = gl.getUniformLocation(genProgram, 'u_colorTex');
-    this.ugRampLutTex = gl.getUniformLocation(genProgram, 'u_rampLutTex');
+    this.ugRampUvRects = gl.getUniformLocation(genProgram, 'u_rampUvRects');
     this.ugViewportPx = gl.getUniformLocation(genProgram, 'u_viewportPx');
     this.ugCellSizePx = gl.getUniformLocation(genProgram, 'u_cellSizePx');
     this.ugGridCols = gl.getUniformLocation(genProgram, 'u_gridCols');

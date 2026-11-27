@@ -91,6 +91,7 @@ vec4 evaluateCell(vec2 cellCoord, vec2 gridDims, float time) {
   }
   velocity = (velocity / max(normSum, 1e-4)) * u_curlStrength;
 
+  float speedMag = length(velocity);
   float speedNorm = clamp(speedMag * 0.42, 0.0, 1.0);
   float potential = 0.5 + 0.5 * fbm3(vec3(p, t), oct, 2.0, 0.5);
   float luminance = smoothstep(0.28, 0.82, mix(potential, speedNorm, 0.55));
