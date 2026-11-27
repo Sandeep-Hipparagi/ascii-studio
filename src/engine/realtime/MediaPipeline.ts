@@ -262,6 +262,10 @@ export class MediaPipeline {
     return this.ownedStream !== null;
   }
 
+  public isVideoOrWebcam(): boolean {
+    return this.ownedStream !== null || this.activeVideoEl !== null;
+  }
+
   public hasInput(): boolean {
     return this.source !== null;
   }
@@ -359,6 +363,55 @@ export class MediaPipeline {
     ctx.imageSmoothingQuality = 'low';
     this.drawFittedSource(ctx, drawable, srcW, srcH, viewportW, viewportH, bw, bh, fitMode);
     return this.backdropStaging.canvas;
+  }
+
+  /**
+   * Renders the un-stylized active media source directly into an arbitrary target
+   * canvas using identical aspect-fit geometry (`contain` / `cover`) for Before/After
+   * split-wipe comparison.
+   */
+  public drawRawFittedToCanvas(
+    targetCanvas: HTMLCanvasElement,
+    viewportW: number,
+    viewportH: number,
+    dpr: number,
+    fitMode: MediaFitMode
+  ): boolean {
+    if (!this.source) return false;
+    const v = this.activeVideoEl;
+    if (v && v.readyState < 2) return false;
+
+    const drawable = this.resolveDrawable();
+    if (!drawable) return false;
+
+    const { srcW, srcH } = this.getDrawableDimensions(drawable);
+    if (srcW <= 0 || srcH <= 0) return false;
+
+    const targetW = Math.max(1, Math.round(viewportW * dpr));
+    const targetH = Math.max(1, Math.round(viewportH * dpr));
+    if (targetCanvas.width !== targetW || targetCanvas.height !== targetH) {
+      targetCanvas.width = targetW;
+      targetCanvas.height = targetH;
+    }
+
+    const ctx = targetCanvas.getContext('2d');
+    if (!ctx) return false;
+
+    ctx.clearRect(0, 0, targetW, targetH);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    this.drawFittedSource(
+      ctx,
+      drawable,
+      srcW,
+      srcH,
+      viewportW,
+      viewportH,
+      targetW,
+      targetH,
+      fitMode
+    );
+    return true;
   }
 
   /**

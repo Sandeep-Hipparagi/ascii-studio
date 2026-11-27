@@ -123,6 +123,7 @@ export class AsciiEngine {
 
   private rampChars: string[];
   private rampString: string;
+  private sortedDenseRamp: string;
   private activeRampIsDensePreset = false;
   private filterMode: AtlasFilterMode = 'linear';
   private grading: MediaGradingParams = { ...DEFAULT_MEDIA_GRADING };
@@ -176,6 +177,14 @@ export class AsciiEngine {
       filterMode: this.filterMode,
     });
     this.atlas.ensureGlyphs(this.rampString + '-|/\\');
+    this.sortedDenseRamp = this.atlas.sortRampByVisualDensity(resolveRampChars('dense'));
+    const initialRampInput = options.defaultRamp ?? DEFAULT_RAMP;
+    if (initialRampInput === 'dense' || initialRampInput === resolveRampChars('dense')) {
+      this.activeRampIsDensePreset = true;
+      this.rampString = this.sortedDenseRamp;
+      this.rampChars = Array.from(this.sortedDenseRamp);
+      this.atlas.ensureGlyphs(this.sortedDenseRamp);
+    }
 
     this.renderer = new WebGLInstancedRenderer(canvas, {
       onContextLost: () => {
@@ -235,6 +244,53 @@ export class AsciiEngine {
 
   public getAtlasMetrics(): GlyphAtlasMetrics {
     return this.atlas.getMetrics();
+  }
+
+  /**
+   * Renders the fitted un-stylized active source media onto an overlay/underlay
+   * canvas for Before/After split-wipe comparison.
+   */
+  public renderCompareSource(targetCanvas: HTMLCanvasElement): boolean {
+    if (this.sourceKind !== 'media') return false;
+    return this.media.drawRawFittedToCanvas(
+      targetCanvas,
+      this.viewportCssW,
+      this.viewportCssH,
+      this.dpr,
+      this.grading.fitMode
+    );
+  }
+
+  /**
+   * Restores the currently active plugin's uniform schema parameters and
+   * default character ramp to factory defaults.
+   */
+  public resetActiveStyle(): void {
+    if (this.sourceKind === 'media' && this.activeRealtimePlugin) {
+      const defaults: Record<string, UniformValue> = {};
+      for (const control of this.activeRealtimePlugin.uniformSchema) {
+        defaults[control.id] = control.default;
+      }
+      this.realtimeParams = defaults;
+      this.setRamp(this.activeRealtimePlugin.defaultRamp, false);
+      this.media.markDirty();
+      this.markDirty();
+      this.scheduleUiNotify();
+      return;
+    }
+
+    if (this.sourceKind === 'generative' && this.activePlugin) {
+      const defaults: Record<string, UniformValue> = {};
+      for (const control of this.activePlugin.uniformSchema) {
+        defaults[control.id] = control.default;
+      }
+      this.generativeParams = defaults;
+      this.setRamp(this.activePlugin.defaultRamp, false);
+      this.workerSim?.reset(this.simSeed);
+      this.rdWorkerBridge?.reset(this.simSeed);
+      this.markDirty();
+      this.scheduleUiNotify();
+    }
   }
 
   public setMediaInput(input: MediaInput | null): void {
@@ -457,10 +513,14 @@ export class AsciiEngine {
 
   public setRamp(ramp: string, sortByDensity = false): void {
     const resolved = resolveRampChars(ramp);
-    const isDensePreset = ramp === 'dense' || ramp === BUILTIN_RAMPS.dense;
+    const isDensePreset =
+      ramp === 'dense' ||
+      ramp === BUILTIN_RAMPS.dense ||
+      ramp === this.sortedDenseRamp;
     this.activeRampIsDensePreset = isDensePreset;
-    this.rampString =
-      sortByDensity || isDensePreset
+    this.rampString = isDensePreset
+      ? this.sortedDenseRamp
+      : sortByDensity
         ? this.atlas.sortRampByVisualDensity(resolved)
         : resolved;
     this.rampChars = Array.from(this.rampString);
@@ -493,6 +553,9 @@ export class AsciiEngine {
 
   public setAudioBands(subBass: number, bass: number, mid: number, treble: number): void {
     this.audioBands = [subBass, bass, mid, treble];
+    if (this.sourceKind === 'generative' && !this.isPlaying) {
+      this.markDirty();
+    }
   }
 
   public setPointer(normX: number, normY: number, isDown: boolean, speed: number): void {
@@ -610,8 +673,9 @@ export class AsciiEngine {
     const rebuilt = await this.atlas.refreshAfterFontsReady();
     if (this.disposed || !rebuilt) return false;
 
+    this.sortedDenseRamp = this.atlas.sortRampByVisualDensity(resolveRampChars('dense'));
     if (this.activeRampIsDensePreset) {
-      this.rampString = this.atlas.sortRampByVisualDensity(resolveRampChars('dense'));
+      this.rampString = this.sortedDenseRamp;
       this.rampChars = Array.from(this.rampString);
       this.atlas.ensureGlyphs(this.rampString);
     }
@@ -1568,6 +1632,7 @@ void main() {
         : 'webgl2-instanced',
       isPlaying: this.isPlaying,
       isWebcamActive: this.media.isWebcamActive(),
+      isVideoOrWebcam: this.media.isVideoOrWebcam(),
       hasMediaInput: this.media.hasInput(),
       isContextLost: !this.renderer.canRender(),
       fps: this.currentFps,
@@ -1576,6 +1641,7 @@ void main() {
       aspectRatio: metrics.aspectRatio,
       fontSize: metrics.fontSizeCssPx,
       ramp: this.rampString,
+      sortedDenseRamp: this.sortedDenseRamp,
       filterMode: this.filterMode,
       grading: this.grading,
       palette: this.palette,

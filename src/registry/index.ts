@@ -4,6 +4,7 @@
  * and extracts typed default parameters directly from `uniformSchema`.
  */
 
+import { AudioSpectralStyle } from '../engine/generative/shaders/AudioSpectralStyle';
 import { DomainWarpedPlasma } from '../engine/generative/shaders/DomainWarpedPlasma';
 import { HarmonicInterference } from '../engine/generative/shaders/HarmonicInterference';
 import { SimplexFlowField } from '../engine/generative/shaders/SimplexFlowField';
@@ -150,7 +151,7 @@ export class StyleRegistry {
 
 export const styleRegistry = StyleRegistry.getInstance();
 
-// Register built-in Phase 3 styles (4 Real-Time + 4 Generative)
+// Register built-in styles (4 Real-Time + 5 Generative)
 styleRegistry
   .registerStyle(ClassicDensityStyle)
   .registerStyle(SobelEdgeStyle)
@@ -159,7 +160,8 @@ styleRegistry
   .registerStyle(SimplexFlowField)
   .registerStyle(HarmonicInterference)
   .registerStyle(DomainWarpedPlasma)
-  .registerStyle(ReactionDiffusionStyle);
+  .registerStyle(ReactionDiffusionStyle)
+  .registerStyle(AudioSpectralStyle);
 
 export function registerStyle(plugin: StylePlugin): StyleRegistry {
   return styleRegistry.registerStyle(plugin);

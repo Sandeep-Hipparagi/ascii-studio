@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   COLOR_PALETTE_PRESETS,
   getDefaultParams,
+  getStyleById,
   listStylesByMode,
   styleRegistry,
 } from '../../registry';
@@ -18,7 +19,8 @@ describe('StyleRegistry & Plugin Schema Validation', () => {
     const all = styleRegistry.listAllStyles();
 
     expect(realtime.length).toBeGreaterThanOrEqual(4);
-    expect(generative.length).toBeGreaterThanOrEqual(4);
+    expect(generative.length).toBeGreaterThanOrEqual(5);
+    expect(getStyleById('audio-spectral')).toBeDefined();
     expect(all.length).toBe(realtime.length + generative.length);
     expect(COLOR_PALETTE_PRESETS.length).toBeGreaterThanOrEqual(6);
 

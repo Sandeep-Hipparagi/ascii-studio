@@ -95,7 +95,11 @@ export function exportSvg(
   }
 
   const textNodes: string[] = [];
-  const baselineOffset = fontSize * 0.85;
+  const dprScale = Math.max(1, atlasMetrics.dpr);
+  const baselineOffset =
+    atlasMetrics.ascentPx !== undefined && atlasMetrics.ascentPx > 0
+      ? atlasMetrics.ascentPx / dprScale
+      : fontSize * 0.85;
 
   for (let r = 0; r < rows; r += 1) {
     const y = (r * cellH + baselineOffset).toFixed(2);

@@ -149,6 +149,7 @@ export class GlyphAtlas {
   private atlasHeight: number;
   private cellWidthPx = 8;
   private cellHeightPx = 14;
+  private ascentPx = 11;
   private slotWidthPx = 12;
   private slotHeightPx = 18;
   private gridCols = 1;
@@ -188,6 +189,7 @@ export class GlyphAtlas {
       dpr: this.dpr,
       cellWidthPx: this.cellWidthPx,
       cellHeightPx: this.cellHeightPx,
+      ascentPx: this.ascentPx,
       aspectRatio: this.cellWidthPx / Math.max(1e-4, this.cellHeightPx),
       slotWidthPx: this.slotWidthPx,
       slotHeightPx: this.slotHeightPx,
@@ -493,6 +495,16 @@ export class GlyphAtlas {
 
     this.cellWidthPx = Math.max(4, Math.round(measuredAdvance));
     this.cellHeightPx = Math.max(4, Math.round(measuredLineHeight));
+
+    ctx.textBaseline = 'alphabetic';
+    const alphaSample = ctx.measureText('M');
+    ctx.textBaseline = 'top';
+    const rawAscent = alphaSample.fontBoundingBoxAscent ?? 0;
+    const fallbackAscent = this.cellHeightPx * 0.82;
+    this.ascentPx =
+      rawAscent > 0
+        ? Math.min(this.cellHeightPx, Math.max(this.cellHeightPx * 0.5, Math.round(rawAscent * 100) / 100))
+        : Math.round(fallbackAscent * 100) / 100;
 
     this.slotWidthPx = Math.max(4, this.cellWidthPx + 2 * this.paddingPx);
     this.slotHeightPx = Math.max(4, this.cellHeightPx + 2 * this.paddingPx);

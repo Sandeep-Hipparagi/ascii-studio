@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X, Copy, Check, Download, FileText, Code2, Film } from 'lucide-react';
 
+import type { AsciiEngineSnapshot } from '../../engine/core/types';
 import type {
   ExportArtifactRequest,
   ExportArtifactResult,
@@ -11,7 +12,81 @@ import type {
 export interface ExportModalProps {
   readonly isOpen: boolean;
   readonly onClose: () => void;
+  readonly snapshot?: AsciiEngineSnapshot;
   readonly onExport: (request: ExportArtifactRequest) => Promise<ExportArtifactResult>;
+}
+
+interface AnsiSpanRun {
+  readonly text: string;
+  readonly fg: string | undefined;
+  readonly bg: string | undefined;
+}
+
+const ANSI_SGR_RE = new RegExp(`${String.fromCharCode(0x1b)}\\[([0-9;]*)m`, 'g');
+
+/**
+ * Parses 24-bit Truecolor SGR sequences (`38;2;R;G;B` and `48;2;R;G;B`) per line
+ * into compact merged `<span>` runs for accurate terminal preview rendering.
+ */
+function parseAnsiLines(raw: string): readonly (readonly AnsiSpanRun[])[] {
+  const lines = raw.split('\n');
+  const parsedLines: AnsiSpanRun[][] = new Array(lines.length);
+
+  for (let l = 0; l < lines.length; l += 1) {
+    const line = lines[l] ?? '';
+    const runs: AnsiSpanRun[] = [];
+    let fg: string | undefined;
+    let bg: string | undefined;
+    let cursor = 0;
+
+    const pushSegment = (segment: string) => {
+      if (segment.length === 0) return;
+      const last = runs[runs.length - 1];
+      if (last && last.fg === fg && last.bg === bg) {
+        runs[runs.length - 1] = { text: last.text + segment, fg, bg };
+      } else {
+        runs.push({ text: segment, fg, bg });
+      }
+    };
+
+    ANSI_SGR_RE.lastIndex = 0;
+    let match: RegExpExecArray | null = ANSI_SGR_RE.exec(line);
+    while (match !== null) {
+      if (match.index > cursor) {
+        pushSegment(line.slice(cursor, match.index));
+      }
+      const codes = (match[1] ?? '').split(';');
+      let i = 0;
+      while (i < codes.length) {
+        const code = Number(codes[i]);
+        if (code === 0 || Number.isNaN(code)) {
+          fg = undefined;
+          bg = undefined;
+          i += 1;
+        } else if (code === 38 && Number(codes[i + 1]) === 2 && i + 4 < codes.length) {
+          fg = `rgb(${Number(codes[i + 2])},${Number(codes[i + 3])},${Number(codes[i + 4])})`;
+          i += 5;
+        } else if (code === 48 && Number(codes[i + 1]) === 2 && i + 4 < codes.length) {
+          bg = `rgb(${Number(codes[i + 2])},${Number(codes[i + 3])},${Number(codes[i + 4])})`;
+          i += 5;
+        } else {
+          i += 1;
+        }
+      }
+      cursor = match.index + match[0].length;
+      match = ANSI_SGR_RE.exec(line);
+    }
+
+    if (cursor < line.length) {
+      pushSegment(line.slice(cursor));
+    }
+    if (runs.length === 0) {
+      runs.push({ text: ' ', fg: undefined, bg: undefined });
+    }
+    parsedLines[l] = runs;
+  }
+
+  return parsedLines;
 }
 
 type ExportTab = 'text' | 'svg' | 'media';
@@ -33,11 +108,7 @@ function triggerDownload(blobOrText: Blob | string, filename: string, mime: stri
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-function stripAnsiEscapes(input: string): string {
-  return input.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-export function ExportModal({ isOpen, onClose, onExport }: ExportModalProps) {
+export function ExportModal({ isOpen, onClose, snapshot, onExport }: ExportModalProps) {
   const [tab, setTab] = useState<ExportTab>('text');
   const [textKind, setTextKind] = useState<'txt' | 'ans'>('txt');
   const [textPreview, setTextPreview] = useState('');
@@ -83,6 +154,28 @@ export function ExportModal({ isOpen, onClose, onExport }: ExportModalProps) {
   }, [isOpen, onClose]);
 
   const svgBytes = useMemo(() => new Blob([svgContent]).size, [svgContent]);
+  const svgPreviewDataUri = useMemo(
+    () =>
+      svgContent.length > 0
+        ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgContent)}`
+        : null,
+    [svgContent]
+  );
+  const ansiLines = useMemo(
+    () => (textKind === 'ans' && textPreview.length > 0 ? parseAnsiLines(textPreview) : null),
+    [textKind, textPreview]
+  );
+
+  const isPausedStaticImage =
+    Boolean(snapshot) &&
+    !snapshot!.isPlaying &&
+    snapshot!.sourceKind === 'media' &&
+    !snapshot!.isVideoOrWebcam;
+
+  const previewFontClass =
+    (snapshot?.cols ?? 80) > 105
+      ? 'text-[6.5px] sm:text-[7.5px] leading-[1.08]'
+      : 'text-[9px] sm:text-[10px] leading-[1.15]';
 
   if (!isOpen) return null;
 
@@ -243,14 +336,42 @@ export function ExportModal({ isOpen, onClose, onExport }: ExportModalProps) {
                 </div>
               </div>
 
-              <pre className="max-h-72 overflow-auto rounded-lg border border-zinc-800 bg-black p-3 font-mono text-[10px] leading-[1.15] text-zinc-200">
-                {textKind === 'ans' ? stripAnsiEscapes(textPreview) : textPreview}
+              <pre
+                className={`max-h-72 overflow-auto rounded-lg border border-zinc-800 bg-black p-3 font-mono whitespace-pre ${previewFontClass} text-zinc-200`}
+              >
+                {ansiLines
+                  ? ansiLines.map((runs, lineIdx) => (
+                      <div key={lineIdx} className="whitespace-pre">
+                        {runs.map((run, runIdx) => (
+                          <span
+                            key={runIdx}
+                            style={{
+                              color: run.fg,
+                              backgroundColor: run.bg,
+                            }}
+                          >
+                            {run.text}
+                          </span>
+                        ))}
+                      </div>
+                    ))
+                  : textPreview}
               </pre>
             </div>
           )}
 
           {tab === 'svg' && (
             <div className="space-y-4">
+              {svgPreviewDataUri && (
+                <div className="overflow-hidden rounded-xl border border-zinc-800 bg-black p-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={svgPreviewDataUri}
+                    alt="SVG vector export preview"
+                    className="max-h-72 w-full rounded object-contain"
+                  />
+                </div>
+              )}
               <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
                 <div>
                   <div className="text-xs font-semibold text-zinc-100">
@@ -337,9 +458,14 @@ export function ExportModal({ isOpen, onClose, onExport }: ExportModalProps) {
                   </div>
                   <button
                     type="button"
-                    disabled={recordingProgress !== null || busyMessage !== null}
+                    disabled={isPausedStaticImage || recordingProgress !== null || busyMessage !== null}
+                    title={
+                      isPausedStaticImage
+                        ? 'Video recording requires live video, webcam, or a generative style'
+                        : 'Record animated canvas video'
+                    }
                     onClick={handleVideoDownload}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-3.5 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/15 px-3.5 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Film className="h-3.5 w-3.5" />
                     {recordingProgress !== null
@@ -347,6 +473,13 @@ export function ExportModal({ isOpen, onClose, onExport }: ExportModalProps) {
                       : `Record ${videoDurationSec}s`}
                   </button>
                 </div>
+
+                {isPausedStaticImage && (
+                  <p className="rounded-lg border border-amber-500/30 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+                    Active source is a static image. Video recording requires live video playback,
+                    an active webcam, or a Generative style.
+                  </p>
+                )}
 
                 {recordingProgress !== null && (
                   <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-800">

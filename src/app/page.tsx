@@ -14,11 +14,15 @@ export default function AsciiStudioPage() {
     containerRef,
     canvasRef,
     snapshot,
+    audioState,
     setStyle,
     updateUniform,
     loadMediaFile,
     loadSamplePreset,
     toggleWebcam,
+    toggleAudioMic,
+    loadAudioFile,
+    stopAudio,
     setFontSize,
     setRamp,
     sortRampByVisualDensity,
@@ -28,6 +32,8 @@ export default function AsciiStudioPage() {
     setFilterMode,
     togglePlay,
     resetSimulation,
+    resetStyle,
+    renderCompareSource,
     exportArtifact,
     onPointerDown,
     onPointerMove,
@@ -107,7 +113,7 @@ export default function AsciiStudioPage() {
 
         <div className="flex items-center gap-2">
           <span className="hidden font-mono text-[11px] text-zinc-500 md:inline">
-            Space: Play/Pause · 1–8: Styles · ⌘/Ctrl+E: Export
+            Space: Play/Pause · 1–9: Styles · ⌘/Ctrl+E: Export
           </span>
           <button
             type="button"
@@ -132,10 +138,15 @@ export default function AsciiStudioPage() {
             containerRef={containerRef}
             canvasRef={canvasRef}
             snapshot={snapshot}
+            audioState={audioState}
             onTogglePlay={togglePlay}
             onToggleWebcam={toggleWebcam}
+            onToggleAudioMic={toggleAudioMic}
+            onLoadAudioFile={loadAudioFile}
+            onStopAudio={stopAudio}
             onLoadFile={loadMediaFile}
             onLoadSamplePreset={loadSamplePreset}
+            onRenderCompareSource={renderCompareSource}
             onResetSimulation={resetSimulation}
             onOpenExport={() => setExportOpen(true)}
             onPointerDown={onPointerDown}
@@ -151,6 +162,7 @@ export default function AsciiStudioPage() {
               snapshot={snapshot}
               onSelectStyle={setStyle}
               onUpdateUniform={updateUniform}
+              onResetStyle={resetStyle}
               onSetFontSize={setFontSize}
               onSetFilterMode={setFilterMode}
               onSetRamp={setRamp}
@@ -166,6 +178,7 @@ export default function AsciiStudioPage() {
       <ExportModal
         isOpen={exportOpen}
         onClose={() => setExportOpen(false)}
+        snapshot={snapshot}
         onExport={exportArtifact}
       />
     </div>

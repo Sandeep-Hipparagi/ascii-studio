@@ -9,10 +9,15 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useState,
   useSyncExternalStore,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 
+import {
+  AudioAnalyzer,
+  type AudioAnalyzerState,
+} from '../engine/audio/AudioAnalyzer';
 import { AsciiEngine } from '../engine/core/AsciiEngine';
 import type {
   AsciiEngineSnapshot,
@@ -49,6 +54,13 @@ export type ExportArtifactResult =
   | { readonly format: 'png'; readonly blob: Blob }
   | ({ readonly format: 'video' } & VideoExportResult);
 
+const DEFAULT_AUDIO_STATE: AudioAnalyzerState = {
+  active: false,
+  source: 'none',
+  label: null,
+  rms: 0,
+};
+
 const SERVER_SNAPSHOT: AsciiEngineSnapshot = {
   sourceKind: 'media',
   activeStyleId: 'classic-density',
@@ -56,6 +68,7 @@ const SERVER_SNAPSHOT: AsciiEngineSnapshot = {
   backendTier: 'webgl2-instanced',
   isPlaying: false,
   isWebcamActive: false,
+  isVideoOrWebcam: false,
   hasMediaInput: false,
   isContextLost: false,
   fps: 0,
@@ -64,6 +77,8 @@ const SERVER_SNAPSHOT: AsciiEngineSnapshot = {
   aspectRatio: 0.6,
   fontSize: 12,
   ramp: ' .:-=+*#%@',
+  sortedDenseRamp:
+    " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$",
   filterMode: 'linear',
   grading: DEFAULT_MEDIA_GRADING,
   palette: {
@@ -219,10 +234,12 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<AsciiEngine | null>(null);
+  const audioAnalyzerRef = useRef<AudioAnalyzer | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const pointerDownRef = useRef(false);
   const lastPointerPosRef = useRef<{ x: number; y: number } | null>(null);
+  const [audioState, setAudioState] = useState<AudioAnalyzerState>(DEFAULT_AUDIO_STATE);
 
   const revokeObjectUrl = useCallback(() => {
     if (objectUrlRef.current) {
@@ -283,6 +300,8 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
     return () => {
       cancelled = true;
       observer.disconnect();
+      audioAnalyzerRef.current?.dispose();
+      audioAnalyzerRef.current = null;
       stopWebcamStream();
       revokeObjectUrl();
       engine.dispose();
@@ -399,6 +418,62 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
     engine.setMediaInput(stream);
   }, [revokeObjectUrl, stopWebcamStream]);
 
+  const getAudioAnalyzer = useCallback((): AudioAnalyzer => {
+    if (!audioAnalyzerRef.current) {
+      audioAnalyzerRef.current = new AudioAnalyzer();
+    }
+    return audioAnalyzerRef.current;
+  }, []);
+
+  const stopAudio = useCallback(() => {
+    const analyzer = audioAnalyzerRef.current;
+    const next = analyzer ? analyzer.stop() : DEFAULT_AUDIO_STATE;
+    setAudioState(next);
+    engineRef.current?.setAudioBands(0, 0, 0, 0);
+  }, []);
+
+  const ensureAudioGenerativeTarget = useCallback((engine: AsciiEngine) => {
+    if (engine.getSnapshot().sourceKind !== 'generative') {
+      const spectral = getStyleById('audio-spectral');
+      if (spectral) {
+        engine.setStylePlugin(spectral);
+      }
+    }
+    engine.setPlaying(true);
+  }, []);
+
+  const toggleAudioMic = useCallback(async (): Promise<void> => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const analyzer = getAudioAnalyzer();
+
+    if (analyzer.getState().source === 'mic' && analyzer.getState().active) {
+      stopAudio();
+      return;
+    }
+
+    const next = await analyzer.startMicrophone((bands) => {
+      engineRef.current?.setAudioBands(bands[0], bands[1], bands[2], bands[3]);
+    });
+    setAudioState(next);
+    ensureAudioGenerativeTarget(engine);
+  }, [ensureAudioGenerativeTarget, getAudioAnalyzer, stopAudio]);
+
+  const loadAudioFile = useCallback(
+    async (file: File): Promise<void> => {
+      const engine = engineRef.current;
+      if (!engine) return;
+      const analyzer = getAudioAnalyzer();
+
+      const next = await analyzer.startAudioFile(file, (bands) => {
+        engineRef.current?.setAudioBands(bands[0], bands[1], bands[2], bands[3]);
+      });
+      setAudioState(next);
+      ensureAudioGenerativeTarget(engine);
+    },
+    [ensureAudioGenerativeTarget, getAudioAnalyzer]
+  );
+
   const setGridResolution = useCallback((cols: number) => {
     engineRef.current?.setGridResolution(cols);
   }, []);
@@ -439,6 +514,14 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
 
   const resetSimulation = useCallback(() => {
     engineRef.current?.resetSeed();
+  }, []);
+
+  const resetStyle = useCallback(() => {
+    engineRef.current?.resetActiveStyle();
+  }, []);
+
+  const renderCompareSource = useCallback((targetCanvas: HTMLCanvasElement): boolean => {
+    return engineRef.current?.renderCompareSource(targetCanvas) ?? false;
   }, []);
 
   const exportArtifact = useCallback(
@@ -487,7 +570,7 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
   // --- Pointer Forwarding to Grid Coordinates ---
 
   const forwardPointer = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>, isDownEvent: boolean) => {
+    (event: ReactPointerEvent<HTMLElement>, isDownEvent: boolean) => {
       const engine = engineRef.current;
       const canvas = canvasRef.current;
       if (!engine || !canvas) return;
@@ -518,7 +601,7 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
   );
 
   const onPointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    (event: ReactPointerEvent<HTMLElement>) => {
       pointerDownRef.current = true;
       forwardPointer(event, true);
     },
@@ -526,7 +609,7 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
   );
 
   const onPointerMove = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    (event: ReactPointerEvent<HTMLElement>) => {
       forwardPointer(event, false);
     },
     [forwardPointer]
@@ -544,11 +627,15 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
     containerRef,
     canvasRef,
     snapshot,
+    audioState,
     setStyle,
     updateUniform,
     loadMediaFile,
     loadSamplePreset,
     toggleWebcam,
+    toggleAudioMic,
+    loadAudioFile,
+    stopAudio,
     setGridResolution,
     setFontSize,
     setRamp,
@@ -559,6 +646,8 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
     setFilterMode,
     togglePlay,
     resetSimulation,
+    resetStyle,
+    renderCompareSource,
     exportArtifact,
     onPointerDown,
     onPointerMove,

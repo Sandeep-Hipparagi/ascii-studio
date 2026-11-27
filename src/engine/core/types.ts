@@ -37,6 +37,8 @@ export interface GlyphAtlasMetrics {
   readonly dpr: number;
   readonly cellWidthPx: number;
   readonly cellHeightPx: number;
+  /** Alphabetic baseline offset from cell top in physical device pixels. */
+  readonly ascentPx?: number;
   /** Monospace advance-to-height ratio: cellWidthPx / cellHeightPx. */
   readonly aspectRatio: number;
   readonly slotWidthPx: number;
@@ -131,6 +133,7 @@ export interface AsciiEngineSnapshot {
   readonly backendTier: 'webgl2-instanced' | 'canvas2d-fallback';
   readonly isPlaying: boolean;
   readonly isWebcamActive: boolean;
+  readonly isVideoOrWebcam: boolean;
   readonly hasMediaInput: boolean;
   readonly isContextLost: boolean;
   readonly fps: number;
@@ -139,6 +142,7 @@ export interface AsciiEngineSnapshot {
   readonly aspectRatio: number;
   readonly fontSize: number;
   readonly ramp: string;
+  readonly sortedDenseRamp?: string;
   readonly filterMode: AtlasFilterMode;
   readonly grading: MediaGradingParams;
   readonly palette: PaletteConfig;
