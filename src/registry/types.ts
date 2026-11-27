@@ -3,7 +3,7 @@
  * Framework-agnostic: contains zero React or DOM runtime imports.
  */
 
-import type { CellFieldOutput } from '../engine/core/types';
+import type { CellFieldOutput, MediaGradingParams } from '../engine/core/types';
 
 export type { CellFieldOutput };
 
@@ -141,6 +141,8 @@ export interface RealtimeProcessorInput {
   readonly subSampleWidth?: number;
   readonly subSampleHeight?: number;
   readonly params: Readonly<Record<string, UniformValue>>;
+  /** Global Studio grading state (`CRT / Grading` drawer). */
+  readonly grading?: MediaGradingParams;
 }
 
 export interface RealtimeStyleOutput extends CellFieldOutput {

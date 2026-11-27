@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Sliders, Sparkles, Monitor, ArrowUpDown, Palette, Tv } from 'lucide-react';
 
 import type {
@@ -49,12 +49,12 @@ const RAMP_OPTIONS = [
 function getPluginBadge(plugin: StylePlugin): { label: string; tone: string } {
   if (plugin.mode === 'realtime') {
     if (plugin.category === 'braille') {
-      return { label: 'Braille', tone: 'bg-violet-500/15 text-violet-300 border-violet-500/30' };
+      return { label: 'CPU Kernel', tone: 'bg-violet-500/15 text-violet-300 border-violet-500/30' };
     }
     if (plugin.category === 'edge-detection') {
-      return { label: 'Edge', tone: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' };
+      return { label: 'CPU Kernel', tone: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' };
     }
-    return { label: 'WebGL2', tone: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
+    return { label: 'CPU Kernel', tone: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
   }
   if (plugin.executionMode === 'worker-grid') {
     return { label: 'Worker', tone: 'bg-amber-500/15 text-amber-300 border-amber-500/30' };
@@ -79,6 +79,10 @@ export function StyleControlsPanel({
   );
   const [customRampDraft, setCustomRampDraft] = useState<string>(snapshot.ramp);
   const [activeDrawer, setActiveDrawer] = useState<'style' | 'typography' | 'postfx'>('style');
+
+  useEffect(() => {
+    setCustomRampDraft(snapshot.ramp);
+  }, [snapshot.activeStyleId, snapshot.ramp]);
 
   const realtimeStyles = useMemo(() => listStylesByMode('realtime'), []);
   const generativeStyles = useMemo(() => listStylesByMode('generative'), []);
@@ -155,23 +159,25 @@ export function StyleControlsPanel({
                 key={plugin.id}
                 type="button"
                 onClick={() => onSelectStyle(plugin.id)}
-                className={`flex flex-col items-start gap-1 rounded-lg border p-2.5 text-left transition ${
+                className={`flex flex-col items-start justify-between gap-1.5 rounded-lg border p-2.5 text-left transition ${
                   isActive
                     ? 'border-emerald-500/60 bg-emerald-500/10 text-white'
                     : 'border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900'
                 }`}
               >
-                <div className="flex w-full items-center justify-between gap-1">
-                  <span className="truncate text-xs font-semibold">{plugin.name}</span>
+                <span className="text-xs font-semibold leading-snug text-left">
+                  {plugin.name}
+                </span>
+                <div className="flex w-full items-center justify-between gap-1.5">
+                  <span className="text-[10px] leading-tight text-zinc-400">
+                    {plugin.category}
+                  </span>
                   <span
                     className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium ${badge.tone}`}
                   >
                     {badge.label}
                   </span>
                 </div>
-                <span className="line-clamp-2 text-[11px] leading-tight text-zinc-400">
-                  {plugin.category}
-                </span>
               </button>
             );
           })}
@@ -302,23 +308,30 @@ export function StyleControlsPanel({
                 </button>
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {RAMP_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => {
-                      setCustomRampDraft(opt.value);
-                      onSetRamp(opt.value, false);
-                    }}
-                    className={`rounded border px-2 py-1 text-[11px] transition ${
-                      snapshot.ramp === opt.value
-                        ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
-                        : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+                {RAMP_OPTIONS.map((opt) => {
+                  const isSelected =
+                    snapshot.ramp === opt.value ||
+                    (opt.id === 'dense' &&
+                      snapshot.ramp.length === opt.value.length &&
+                      Array.from(snapshot.ramp).every((ch) => opt.value.includes(ch)));
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setCustomRampDraft(opt.value);
+                        onSetRamp(opt.value, opt.id === 'dense');
+                      }}
+                      className={`rounded border px-2 py-1 text-[11px] transition ${
+                        isSelected
+                          ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
+                          : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
               </div>
               <input
                 type="text"
@@ -439,6 +452,15 @@ export function StyleControlsPanel({
                 step={0.05}
                 defaultValue={0}
                 onChange={(v) => onSetPostFx({ bloomIntensity: v })}
+              />
+              <SimpleSlider
+                label="Source Backdrop"
+                value={snapshot.postFx.backdropOpacity ?? 0}
+                min={0}
+                max={0.6}
+                step={0.02}
+                defaultValue={0}
+                onChange={(v) => onSetPostFx({ backdropOpacity: v })}
               />
             </div>
           </div>

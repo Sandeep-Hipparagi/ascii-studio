@@ -29,6 +29,86 @@ const DEFAULT_FONT_FAMILY = "'Geist Mono', 'JetBrains Mono', monospace";
 const DEFAULT_MAX_ATLAS_SIZE = 2048;
 const DEFAULT_PADDING_PX = 2;
 
+const BRAILLE_DOT_BITS = [
+  0x01, 0x02, 0x04, 0x40, // Left column (rows 0..3)
+  0x08, 0x10, 0x20, 0x80, // Right column (rows 0..3)
+] as const;
+
+function extractCssFontToken(cssValue: string): string | null {
+  const trimmed = cssValue.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Resolves Next.js font CSS variables (`--font-geist-mono`, `--font-jetbrains-mono`)
+ * attached to the DOM root before falling back to literal family names.
+ */
+function resolveDefaultMonoFontFamily(): string {
+  if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') {
+    return DEFAULT_FONT_FAMILY;
+  }
+
+  const root = document.documentElement ?? document.body;
+  if (!root) return DEFAULT_FONT_FAMILY;
+
+  const computed = getComputedStyle(root);
+  const bodyComputed = document.body ? getComputedStyle(document.body) : null;
+  const parts: string[] = [];
+
+  for (const varName of ['--font-geist-mono', '--font-jetbrains-mono'] as const) {
+    const token =
+      extractCssFontToken(computed.getPropertyValue(varName)) ??
+      (bodyComputed ? extractCssFontToken(bodyComputed.getPropertyValue(varName)) : null);
+    if (token && !parts.includes(token)) {
+      parts.push(token);
+    }
+  }
+
+  return parts.length > 0 ? `${parts.join(', ')}, ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
+}
+
+function drawGlyphBitmap(
+  ctx: Canvas2DContext,
+  char: string,
+  originX: number,
+  originY: number,
+  cellWidthPx: number,
+  cellHeightPx: number,
+  fontSpec: string
+): void {
+  const code = char.length === 1 ? char.charCodeAt(0) : -1;
+  ctx.fillStyle = '#ffffff';
+
+  if (code >= 0x2800 && code <= 0x28ff) {
+    // Rasterize Unicode Braille across the full cell box cleanly so stacked
+    // rows align seamlessly without monospace descender scan-gaps.
+    const mask = code - 0x2800;
+    if (mask === 0) return;
+
+    const pitchX = cellWidthPx / 2;
+    const pitchY = cellHeightPx / 4;
+    const radius = Math.max(0.75, Math.min(pitchX, pitchY) * 0.36);
+
+    for (let dx = 0; dx < 2; dx += 1) {
+      const cx = originX + (dx + 0.5) * pitchX;
+      for (let dy = 0; dy < 4; dy += 1) {
+        const bit = BRAILLE_DOT_BITS[dx * 4 + dy] ?? 0;
+        if ((mask & bit) === 0) continue;
+        const cy = originY + (dy + 0.5) * pitchY;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    return;
+  }
+
+  ctx.font = fontSpec;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText(char, originX, originY);
+}
+
 function createSurface(width: number, height: number): {
   canvas: CanvasSurface;
   ctx: Canvas2DContext;
@@ -59,6 +139,7 @@ function createSurface(width: number, height: number): {
 export class GlyphAtlas {
   private readonly maxAtlasSize: number;
   private readonly paddingPx: number;
+  private hasCustomFontFamily: boolean;
   private fontFamily: string;
   private fontSizeCssPx: number;
   private dpr: number;
@@ -83,7 +164,8 @@ export class GlyphAtlas {
   private needsFullUpload = true;
 
   public constructor(options: GlyphAtlasOptions = {}) {
-    this.fontFamily = options.fontFamily ?? DEFAULT_FONT_FAMILY;
+    this.hasCustomFontFamily = options.fontFamily !== undefined;
+    this.fontFamily = options.fontFamily ?? resolveDefaultMonoFontFamily();
     this.fontSizeCssPx = Math.max(4, options.fontSizeCssPx ?? 12);
     this.dpr = Math.max(1, options.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1));
     this.maxAtlasSize = Math.min(2048, Math.max(256, options.maxAtlasSize ?? DEFAULT_MAX_ATLAS_SIZE));
@@ -129,21 +211,56 @@ export class GlyphAtlas {
   public updateTypography(
     fontSizeCssPx: number,
     dpr: number = this.dpr,
-    fontFamily: string = this.fontFamily
+    fontFamily?: string
   ): boolean {
     const nextFontPx = Math.max(4, fontSizeCssPx);
     const nextDpr = Math.max(1, dpr);
+    const nextFamily = fontFamily ?? (this.hasCustomFontFamily ? this.fontFamily : resolveDefaultMonoFontFamily());
+    if (fontFamily !== undefined) {
+      this.hasCustomFontFamily = true;
+    }
+
     if (
       nextFontPx === this.fontSizeCssPx &&
       nextDpr === this.dpr &&
-      fontFamily === this.fontFamily
+      nextFamily === this.fontFamily
     ) {
       return false;
     }
 
     this.fontSizeCssPx = nextFontPx;
     this.dpr = nextDpr;
-    this.fontFamily = fontFamily;
+    this.fontFamily = nextFamily;
+    this.reconfigureFontMetrics();
+    return true;
+  }
+
+  /**
+   * Awaits browser font resolution (`document.fonts.ready`) and rebuilds the
+   * glyph atlas from the actual loaded web font rather than OS fallback metrics.
+   */
+  public async refreshAfterFontsReady(): Promise<boolean> {
+    if (typeof document === 'undefined' || !document.fonts) {
+      return false;
+    }
+
+    if (!this.hasCustomFontFamily) {
+      this.fontFamily = resolveDefaultMonoFontFamily();
+    }
+
+    if (typeof document.fonts.load === 'function') {
+      await document.fonts.load(this.buildFontSpec(), ' .:-=+*#%@M').catch(() => []);
+    }
+    await document.fonts.ready;
+
+    if (!this.hasCustomFontFamily) {
+      this.fontFamily = resolveDefaultMonoFontFamily();
+    }
+
+    if (this.boundGl && this.texture && !this.boundGl.isContextLost()) {
+      this.boundGl.deleteTexture(this.texture);
+    }
+    this.invalidateTexture();
     this.reconfigureFontMetrics();
     return true;
   }
@@ -223,8 +340,8 @@ export class GlyphAtlas {
    * rasterized alpha over the cell box.
    */
   public measureGlyphDensity(char: string): number {
-    const w = Math.max(4, Math.ceil(this.cellWidthPx));
-    const h = Math.max(4, Math.ceil(this.cellHeightPx));
+    const w = Math.max(4, Math.round(this.cellWidthPx));
+    const h = Math.max(4, Math.round(this.cellHeightPx));
     const { canvas, ctx } = this.densityScratch;
 
     if (canvas.width !== w || canvas.height !== h) {
@@ -233,11 +350,7 @@ export class GlyphAtlas {
     }
 
     ctx.clearRect(0, 0, w, h);
-    ctx.font = this.buildFontSpec();
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(char, 0, 0);
+    drawGlyphBitmap(ctx, char, 0, 0, w, h, this.buildFontSpec());
 
     const { data } = ctx.getImageData(0, 0, w, h);
     let alphaSum = 0;
@@ -378,11 +491,11 @@ export class GlyphAtlas {
     const measuredLineHeight =
       ascent + descent > 0 ? ascent + descent : physicalFontPx * 1.2;
 
-    this.cellWidthPx = measuredAdvance;
-    this.cellHeightPx = measuredLineHeight;
+    this.cellWidthPx = Math.max(4, Math.round(measuredAdvance));
+    this.cellHeightPx = Math.max(4, Math.round(measuredLineHeight));
 
-    this.slotWidthPx = Math.max(4, Math.ceil(this.cellWidthPx) + 2 * this.paddingPx);
-    this.slotHeightPx = Math.max(4, Math.ceil(this.cellHeightPx) + 2 * this.paddingPx);
+    this.slotWidthPx = Math.max(4, this.cellWidthPx + 2 * this.paddingPx);
+    this.slotHeightPx = Math.max(4, this.cellHeightPx + 2 * this.paddingPx);
 
     this.gridCols = Math.max(1, Math.floor(this.atlasWidth / this.slotWidthPx));
     const gridRows = Math.max(1, Math.floor(this.atlasHeight / this.slotHeightPx));
@@ -401,11 +514,15 @@ export class GlyphAtlas {
   private rasterizeGlyph(char: string, slotX: number, slotY: number): void {
     const { ctx } = this.surface;
     ctx.clearRect(slotX, slotY, this.slotWidthPx, this.slotHeightPx);
-    ctx.font = this.buildFontSpec();
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(char, slotX + this.paddingPx, slotY + this.paddingPx);
+    drawGlyphBitmap(
+      ctx,
+      char,
+      slotX + this.paddingPx,
+      slotY + this.paddingPx,
+      this.cellWidthPx,
+      this.cellHeightPx,
+      this.buildFontSpec()
+    );
   }
 
   private applyTextureParameters(gl: WebGL2RenderingContext, texture: WebGLTexture): void {

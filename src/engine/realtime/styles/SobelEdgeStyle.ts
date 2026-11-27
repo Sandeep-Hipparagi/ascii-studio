@@ -9,13 +9,16 @@
 import type { RealtimeStylePlugin } from '../../../registry/types';
 import {
   REALTIME_RAMP_PRESETS,
+  RealtimeBufferPool,
   clamp01,
-  extractGradedLuminanceField,
-  gradeSourceRgba,
+  extractGradedLuminanceFieldInto,
+  gradeSourceRgbaInto,
   quantizeGradientToEdgeGlyph,
   readBooleanParam,
   readNumberParam,
 } from './shared';
+
+const sobelPool = new RealtimeBufferPool();
 
 export const SobelEdgeStyle: RealtimeStylePlugin = {
   mode: 'realtime',
@@ -90,17 +93,24 @@ export const SobelEdgeStyle: RealtimeStylePlugin = {
     const contrast = readNumberParam(params, 'contrast', 0.1);
     const invert = readBooleanParam(params, 'invert', false);
 
-    const luma = extractGradedLuminanceField(rgba, cellCount, {
-      brightness: 0,
-      contrast,
-      gamma: 1.0,
-      invert,
-    });
-    const gradedRgb = gradeSourceRgba(rgba, cellCount, 0, contrast, invert);
-    const field = new Float32Array(cellCount * 4);
-    const edgeStrength = new Float32Array(cellCount);
-    const glyphs: string[] = new Array(cellCount);
-    const shadeRamp = Array.from(REALTIME_RAMP_PRESETS.minimal);
+    const { luma, gradedRgb, field, edgeStrength, glyphs } = sobelPool.acquire(
+      cols,
+      rows,
+      cellCount
+    );
+    extractGradedLuminanceFieldInto(
+      rgba,
+      cellCount,
+      {
+        brightness: 0,
+        contrast,
+        gamma: 1.0,
+        invert,
+      },
+      luma
+    );
+    gradeSourceRgbaInto(rgba, cellCount, 0, contrast, invert, gradedRgb);
+    const shadeRamp = sobelPool.getRampChars(REALTIME_RAMP_PRESETS.minimal);
 
     const lumaAt = (x: number, y: number): number => {
       const cx = x < 0 ? 0 : x >= cols ? cols - 1 : x;

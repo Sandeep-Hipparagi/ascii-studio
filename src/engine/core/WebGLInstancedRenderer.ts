@@ -13,6 +13,13 @@ import {
   type PostFxUniforms,
 } from './types';
 
+export type BackdropSource =
+  | HTMLCanvasElement
+  | OffscreenCanvas
+  | ImageBitmap
+  | HTMLImageElement
+  | HTMLVideoElement;
+
 export interface RendererLifecycleCallbacks {
   readonly onContextLost?: () => void;
   readonly onContextRestored?: () => void;
@@ -39,8 +46,10 @@ void main() {
   float scale = float((a_rotationOrFlags >> 8u) & 0xFFu) / 127.5;
   scale = (scale > 0.0) ? scale : 1.0;
 
-  vec2 snappedOrigin = floor(a_cellPos + 0.5);
-  vec2 snappedSize = max(vec2(1.0), floor(u_cellSizePx * scale + 0.5));
+  vec2 snappedCell = max(vec2(1.0), floor(u_cellSizePx + 0.5));
+  vec2 gridCoord = floor(a_cellPos / max(u_cellSizePx, vec2(1e-4)) + 0.5);
+  vec2 snappedOrigin = gridCoord * snappedCell;
+  vec2 snappedSize = max(vec2(1.0), floor(snappedCell * scale + 0.5));
 
   vec2 worldPx;
   if ((a_rotationOrFlags & 65536u) != 0u) {
@@ -49,7 +58,7 @@ void main() {
     float s = sin(angle);
     vec2 centered = (a_corner - 0.5) * snappedSize;
     vec2 rotated = vec2(centered.x * c - centered.y * s, centered.x * s + centered.y * c);
-    worldPx = floor(snappedOrigin + 0.5 * u_cellSizePx + rotated + 0.5);
+    worldPx = floor(snappedOrigin + 0.5 * snappedCell + rotated + 0.5);
   } else {
     worldPx = snappedOrigin + a_corner * snappedSize;
   }
@@ -119,7 +128,420 @@ void main() {
 }
 `;
 
+const GENERATIVE_GRID_VERT_SOURCE = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+precision highp usampler2D;
+
+layout(location = 0) in vec2 a_corner;
+
+uniform sampler2D  u_fieldTex;
+uniform sampler2D  u_colorTex;
+uniform usampler2D u_rampLutTex;
+
+uniform vec2  u_viewportPx;
+uniform vec2  u_cellSizePx;
+uniform int   u_gridCols;
+uniform int   u_rampLen;
+uniform float u_firstRampIsSpace;
+uniform float u_allowDirectional;
+uniform float u_directionalMinLum;
+uniform uint  u_invertFlag;
+uniform int   u_colorMode;
+uniform vec4  u_fgColor;
+uniform vec4  u_bgColor;
+
+out vec2 v_uv;
+out vec4 v_uvBounds;
+out vec4 v_fgColor;
+out vec4 v_bgColor;
+flat out uint v_flags;
+
+void main() {
+  int cols = max(1, u_gridCols);
+  int col = gl_InstanceID % cols;
+  int row = gl_InstanceID / cols;
+
+  vec4 cellField = texelFetch(u_fieldTex, ivec2(col, row), 0);
+  vec4 cellColor = texelFetch(u_colorTex, ivec2(col, row), 0);
+
+  float lum = cellField.r;
+  float angle = (cellField.g * 255.0 - 128.0) / 127.0 * 3.14159265;
+  float paletteIdx = cellField.b;
+  float alpha = cellField.a;
+
+  int glyphIdx = -1;
+  uint flags = u_invertFlag;
+
+  if (alpha > 0.005 && u_rampLen > 0) {
+    bool useDirectional =
+      u_allowDirectional > 0.5 &&
+      lum >= u_directionalMinLum &&
+      abs(angle) > 1e-3;
+
+    if (useDirectional) {
+      float wrapped = mod(mod(angle, 3.14159265) + 3.14159265, 3.14159265);
+      int bin = int(floor(wrapped / 0.78539816 + 0.5)) & 3;
+      glyphIdx = u_rampLen + bin;
+      flags |= 262144u;
+    } else {
+      glyphIdx = clamp(int(floor(lum * float(u_rampLen))), 0, u_rampLen - 1);
+    }
+  }
+
+  if (glyphIdx < 0 || (glyphIdx == 0 && u_firstRampIsSpace > 0.5)) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    v_uv = vec2(0.0);
+    v_uvBounds = vec4(0.0);
+    v_fgColor = vec4(0.0);
+    v_bgColor = vec4(0.0);
+    v_flags = 0u;
+    return;
+  }
+
+  uvec4 rectNorm = texelFetch(u_rampLutTex, ivec2(glyphIdx, 0), 0);
+  vec4 glyphUvRect = vec4(rectNorm) / 65535.0;
+
+  vec2 snappedCell = max(vec2(1.0), floor(u_cellSizePx + 0.5));
+  vec2 snappedOrigin = vec2(float(col), float(row)) * snappedCell;
+  vec2 worldPx = snappedOrigin + a_corner * snappedCell;
+  vec2 ndc = (worldPx / max(u_viewportPx, vec2(1.0))) * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+  gl_Position = vec4(ndc, 0.0, 1.0);
+
+  vec3 fgRgb = u_fgColor.rgb;
+  if (u_colorMode == 0) {
+    if (cellColor.a > 0.5) {
+      fgRgb = cellColor.rgb;
+    } else if (paletteIdx > 0.001) {
+      fgRgb = clamp(0.5 + 0.5 * cos(6.2831853 * (paletteIdx + vec3(0.0, 0.33, 0.67))), 0.0, 1.0);
+    }
+  } else if (u_colorMode == 2) {
+    fgRgb = mix(u_bgColor.rgb, u_fgColor.rgb, paletteIdx);
+  }
+
+  v_uv = glyphUvRect.xy + a_corner * glyphUvRect.zw;
+  v_uvBounds = vec4(glyphUvRect.xy, glyphUvRect.xy + glyphUvRect.zw);
+  v_fgColor = vec4(fgRgb, u_fgColor.a * alpha);
+  v_bgColor = vec4(u_bgColor.rgb, 0.0);
+  v_flags = flags;
+}
+`;
+
+const BACKDROP_VERT_SOURCE = `#version 300 es
+layout(location = 0) in vec2 a_corner;
+out vec2 v_uv;
+void main() {
+  v_uv = vec2(a_corner.x, 1.0 - a_corner.y);
+  gl_Position = vec4(a_corner * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
+const BACKDROP_FRAG_SOURCE = `#version 300 es
+precision mediump float;
+uniform sampler2D u_backdropTex;
+uniform float u_backdropOpacity;
+in vec2 v_uv;
+out vec4 outColor;
+void main() {
+  vec4 tex = texture(u_backdropTex, v_uv);
+  float a = clamp(u_backdropOpacity * tex.a, 0.0, 1.0);
+  outColor = vec4(tex.rgb * a, a);
+}
+`;
+
 const INITIAL_INSTANCE_CAPACITY = 4096;
+
+const CANVAS2D_BRAILLE_DOT_BITS = [
+  0x01, 0x02, 0x04, 0x40,
+  0x08, 0x10, 0x20, 0x80,
+] as const;
+
+function rgbaCss(r: number, g: number, b: number, aByte: number): string {
+  if (aByte >= 255) {
+    return `rgb(${r},${g},${b})`;
+  }
+  const a = Math.round((aByte / 255) * 1000) / 1000;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+/**
+ * Software Canvas 2D fallback renderer mirroring the instanced cell batcher
+ * (`fillRect` background cells + horizontally batched `fillText` runs) when
+ * WebGL2 is unavailable or unrecoverable.
+ */
+export class Canvas2DRenderer {
+  private readonly canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D | null;
+
+  private capacity = 0;
+  private cellCount = 0;
+  private xPx = new Float32Array(0);
+  private yPx = new Float32Array(0);
+  private chars: string[] = [];
+  private fgRgba = new Uint8ClampedArray(0);
+  private bgRgba = new Uint8ClampedArray(0);
+  private flags = new Uint32Array(0);
+
+  public constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d', { alpha: true });
+    this.ensureCapacity(INITIAL_INSTANCE_CAPACITY);
+  }
+
+  public hasContext(): boolean {
+    if (!this.ctx) {
+      this.ctx = this.canvas.getContext('2d', { alpha: true });
+    }
+    return this.ctx !== null;
+  }
+
+  public beginFrame(): void {
+    this.cellCount = 0;
+  }
+
+  public ensureCapacity(requiredCells: number): void {
+    if (requiredCells <= this.capacity) return;
+
+    let nextCap = Math.max(INITIAL_INSTANCE_CAPACITY, this.capacity || INITIAL_INSTANCE_CAPACITY);
+    while (nextCap < requiredCells) {
+      nextCap *= 2;
+    }
+
+    const nextX = new Float32Array(nextCap);
+    const nextY = new Float32Array(nextCap);
+    const nextFg = new Uint8ClampedArray(nextCap * 4);
+    const nextBg = new Uint8ClampedArray(nextCap * 4);
+    const nextFlags = new Uint32Array(nextCap);
+
+    if (this.cellCount > 0) {
+      nextX.set(this.xPx.subarray(0, this.cellCount));
+      nextY.set(this.yPx.subarray(0, this.cellCount));
+      nextFg.set(this.fgRgba.subarray(0, this.cellCount * 4));
+      nextBg.set(this.bgRgba.subarray(0, this.cellCount * 4));
+      nextFlags.set(this.flags.subarray(0, this.cellCount));
+    }
+
+    this.chars.length = nextCap;
+    this.xPx = nextX;
+    this.yPx = nextY;
+    this.fgRgba = nextFg;
+    this.bgRgba = nextBg;
+    this.flags = nextFlags;
+    this.capacity = nextCap;
+  }
+
+  public pushCell(
+    xPx: number,
+    yPx: number,
+    ch: string,
+    fgR: number,
+    fgG: number,
+    fgB: number,
+    fgA: number,
+    bgR: number,
+    bgG: number,
+    bgB: number,
+    bgA: number,
+    flags = 0
+  ): void {
+    const idx = this.cellCount;
+    if (idx >= this.capacity) {
+      this.ensureCapacity(idx + 1);
+    }
+    const p4 = idx * 4;
+    this.xPx[idx] = xPx;
+    this.yPx[idx] = yPx;
+    this.chars[idx] = ch;
+    this.fgRgba[p4] = fgR;
+    this.fgRgba[p4 + 1] = fgG;
+    this.fgRgba[p4 + 2] = fgB;
+    this.fgRgba[p4 + 3] = fgA;
+    this.bgRgba[p4] = bgR;
+    this.bgRgba[p4 + 1] = bgG;
+    this.bgRgba[p4 + 2] = bgB;
+    this.bgRgba[p4 + 3] = bgA;
+    this.flags[idx] = flags;
+    this.cellCount = idx + 1;
+  }
+
+  public flush(
+    atlas: GlyphAtlas,
+    cellWidthPx: number,
+    cellHeightPx: number,
+    clearRgba: readonly [number, number, number, number] = [0, 0, 0, 1],
+    postFx: PostFxUniforms = {
+      crtScanlineIntensity: 0,
+      crtScanlineDensity: 1.5,
+      bloomIntensity: 0,
+      bloomThreshold: 0.55,
+      backdropOpacity: 0,
+    },
+    backdropSource: BackdropSource | null = null
+  ): void {
+    if (!this.hasContext() || !this.ctx) return;
+    const ctx = this.ctx;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    const cellW = Math.max(1, Math.round(cellWidthPx));
+    const cellH = Math.max(1, Math.round(cellHeightPx));
+
+    ctx.fillStyle = rgbaCss(
+      Math.round(clearRgba[0] * 255),
+      Math.round(clearRgba[1] * 255),
+      Math.round(clearRgba[2] * 255),
+      Math.round(clearRgba[3] * 255)
+    );
+    ctx.fillRect(0, 0, w, h);
+
+    const backdropAlpha = Math.max(0, Math.min(1, postFx.backdropOpacity ?? 0));
+    if (backdropSource && backdropAlpha > 0.001) {
+      ctx.save();
+      ctx.globalAlpha = backdropAlpha;
+      ctx.filter = 'blur(8px)';
+      ctx.drawImage(backdropSource, 0, 0, w, h);
+      ctx.restore();
+    }
+
+    if (this.cellCount === 0) return;
+
+    // Pass 1: Background & inverted cell rects
+    let lastRectStyle = '';
+    for (let i = 0; i < this.cellCount; i += 1) {
+      const p4 = i * 4;
+      const inverted = ((this.flags[i] ?? 0) & CELL_FLAG_INVERT_GLYPH) !== 0;
+      const bgA = this.bgRgba[p4 + 3] ?? 0;
+      if (!inverted && bgA <= 0) continue;
+
+      const style = inverted
+        ? rgbaCss(
+            this.fgRgba[p4] ?? 240,
+            this.fgRgba[p4 + 1] ?? 245,
+            this.fgRgba[p4 + 2] ?? 240,
+            this.fgRgba[p4 + 3] ?? 255
+          )
+        : rgbaCss(
+            this.bgRgba[p4] ?? 0,
+            this.bgRgba[p4 + 1] ?? 0,
+            this.bgRgba[p4 + 2] ?? 0,
+            bgA
+          );
+
+      if (style !== lastRectStyle) {
+        ctx.fillStyle = style;
+        lastRectStyle = style;
+      }
+      const x = Math.round(this.xPx[i] ?? 0);
+      const y = Math.round(this.yPx[i] ?? 0);
+      ctx.fillRect(x, y, cellW, cellH);
+    }
+
+    // Pass 2: Batched foreground fillText runs + full-cell Braille vectors
+    const metrics = atlas.getMetrics();
+    const fontPx = Math.round(metrics.fontSizeCssPx * metrics.dpr * 100) / 100;
+    ctx.font = `400 ${fontPx}px ${metrics.fontFamily}`;
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+
+    let lastFgStyle = '';
+    let i = 0;
+    while (i < this.cellCount) {
+      const p4 = i * 4;
+      const ch = this.chars[i] ?? ' ';
+      const fgA = this.fgRgba[p4 + 3] ?? 0;
+      if (fgA <= 0 || ch === ' ') {
+        i += 1;
+        continue;
+      }
+
+      const inverted = ((this.flags[i] ?? 0) & CELL_FLAG_INVERT_GLYPH) !== 0;
+      const style = inverted
+        ? rgbaCss(
+            this.bgRgba[p4] ?? 10,
+            this.bgRgba[p4 + 1] ?? 12,
+            this.bgRgba[p4 + 2] ?? 14,
+            255
+          )
+        : rgbaCss(
+            this.fgRgba[p4] ?? 240,
+            this.fgRgba[p4 + 1] ?? 245,
+            this.fgRgba[p4 + 2] ?? 240,
+            fgA
+          );
+
+      if (style !== lastFgStyle) {
+        ctx.fillStyle = style;
+        lastFgStyle = style;
+      }
+
+      const x0 = Math.round(this.xPx[i] ?? 0);
+      const y0 = Math.round(this.yPx[i] ?? 0);
+      const code = ch.length === 1 ? ch.charCodeAt(0) : -1;
+
+      if (code >= 0x2800 && code <= 0x28ff) {
+        const mask = code - 0x2800;
+        if (mask !== 0) {
+          const pitchX = cellW / 2;
+          const pitchY = cellH / 4;
+          const radius = Math.max(0.75, Math.min(pitchX, pitchY) * 0.36);
+          for (let dx = 0; dx < 2; dx += 1) {
+            const cx = x0 + (dx + 0.5) * pitchX;
+            for (let dy = 0; dy < 4; dy += 1) {
+              const bit = CANVAS2D_BRAILLE_DOT_BITS[dx * 4 + dy] ?? 0;
+              if ((mask & bit) === 0) continue;
+              ctx.beginPath();
+              ctx.arc(cx, y0 + (dy + 0.5) * pitchY, radius, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        }
+        i += 1;
+        continue;
+      }
+
+      // Batch contiguous same-row, same-color glyphs into one fillText call
+      let run = ch;
+      let nextIdx = i + 1;
+      let expectedX = x0 + cellW;
+      while (nextIdx < this.cellCount) {
+        const nCh = this.chars[nextIdx] ?? ' ';
+        const nCode = nCh.length === 1 ? nCh.charCodeAt(0) : -1;
+        if (nCh === ' ' || (nCode >= 0x2800 && nCode <= 0x28ff)) break;
+
+        const nY = Math.round(this.yPx[nextIdx] ?? 0);
+        const nX = Math.round(this.xPx[nextIdx] ?? 0);
+        if (nY !== y0 || nX !== expectedX) break;
+
+        const np4 = nextIdx * 4;
+        const nInv = ((this.flags[nextIdx] ?? 0) & CELL_FLAG_INVERT_GLYPH) !== 0;
+        if (
+          nInv !== inverted ||
+          this.fgRgba[np4] !== this.fgRgba[p4] ||
+          this.fgRgba[np4 + 1] !== this.fgRgba[p4 + 1] ||
+          this.fgRgba[np4 + 2] !== this.fgRgba[p4 + 2] ||
+          this.fgRgba[np4 + 3] !== fgA
+        ) {
+          break;
+        }
+
+        run += nCh;
+        expectedX += cellW;
+        nextIdx += 1;
+      }
+
+      ctx.fillText(run, x0, y0);
+      i = nextIdx;
+    }
+
+    if (postFx.crtScanlineIntensity > 0.001) {
+      const stepY = Math.max(2, Math.round(4 / Math.max(0.5, postFx.crtScanlineDensity)));
+      ctx.fillStyle = `rgba(0,0,0,${Math.min(0.65, postFx.crtScanlineIntensity * 0.65)})`;
+      for (let sy = 0; sy < h; sy += stepY) {
+        ctx.fillRect(0, sy, w, 1);
+      }
+    }
+  }
+}
 
 function compileShader(
   gl: WebGL2RenderingContext,
@@ -159,6 +581,37 @@ export class WebGLInstancedRenderer {
   private uBloomIntensity: WebGLUniformLocation | null = null;
   private uBloomThreshold: WebGLUniformLocation | null = null;
 
+  private generativeProgram: WebGLProgram | null = null;
+  private generativeVao: WebGLVertexArrayObject | null = null;
+  private rampLutTex: WebGLTexture | null = null;
+  private rampLutU16 = new Uint16Array(0);
+  private lastRampCacheKey = '';
+
+  private ugAtlasTex: WebGLUniformLocation | null = null;
+  private ugFieldTex: WebGLUniformLocation | null = null;
+  private ugColorTex: WebGLUniformLocation | null = null;
+  private ugRampLutTex: WebGLUniformLocation | null = null;
+  private ugViewportPx: WebGLUniformLocation | null = null;
+  private ugCellSizePx: WebGLUniformLocation | null = null;
+  private ugGridCols: WebGLUniformLocation | null = null;
+  private ugRampLen: WebGLUniformLocation | null = null;
+  private ugFirstRampIsSpace: WebGLUniformLocation | null = null;
+  private ugAllowDirectional: WebGLUniformLocation | null = null;
+  private ugDirectionalMinLum: WebGLUniformLocation | null = null;
+  private ugInvertFlag: WebGLUniformLocation | null = null;
+  private ugColorMode: WebGLUniformLocation | null = null;
+  private ugFgColor: WebGLUniformLocation | null = null;
+  private ugBgColor: WebGLUniformLocation | null = null;
+  private ugCrtIntensity: WebGLUniformLocation | null = null;
+  private ugCrtDensity: WebGLUniformLocation | null = null;
+  private ugBloomIntensity: WebGLUniformLocation | null = null;
+  private ugBloomThreshold: WebGLUniformLocation | null = null;
+
+  private backdropProgram: WebGLProgram | null = null;
+  private backdropTex: WebGLTexture | null = null;
+  private ubBackdropTex: WebGLUniformLocation | null = null;
+  private ubBackdropOpacity: WebGLUniformLocation | null = null;
+
   private capacity: number;
   private instanceBuffer: ArrayBuffer;
   private f32View: Float32Array;
@@ -168,6 +621,8 @@ export class WebGLInstancedRenderer {
   private instanceCount = 0;
 
   private contextLost = false;
+  private usingFallback2d = false;
+  private fallback2d: Canvas2DRenderer | null = null;
   private disposed = false;
 
   private readonly handleContextLost = (event: Event): void => {
@@ -177,13 +632,24 @@ export class WebGLInstancedRenderer {
     this.vao = null;
     this.quadVbo = null;
     this.instanceVbo = null;
+    this.generativeProgram = null;
+    this.generativeVao = null;
+    this.backdropProgram = null;
+    this.backdropTex = null;
+    this.rampLutTex = null;
+    this.lastRampCacheKey = '';
     this.lastAtlas?.invalidateTexture();
+    if (!this.fallback2d) {
+      this.fallback2d = new Canvas2DRenderer(this.canvas);
+    }
+    this.usingFallback2d = this.fallback2d.hasContext();
     this.callbacks.onContextLost?.();
   };
 
   private readonly handleContextRestored = (): void => {
     if (this.disposed) return;
     this.contextLost = false;
+    this.usingFallback2d = false;
     this.initGpuResources();
     if (this.gl && this.lastAtlas) {
       this.lastAtlas.invalidateTexture();
@@ -220,6 +686,14 @@ export class WebGLInstancedRenderer {
     return this.contextLost || !this.gl || this.gl.isContextLost();
   }
 
+  public isUsingFallback2d(): boolean {
+    return this.usingFallback2d && Boolean(this.fallback2d?.hasContext());
+  }
+
+  public canRender(): boolean {
+    return !this.isContextLost() || this.isUsingFallback2d();
+  }
+
   public resize(widthPx: number, heightPx: number): void {
     const w = Math.max(1, Math.round(widthPx));
     const h = Math.max(1, Math.round(heightPx));
@@ -232,6 +706,9 @@ export class WebGLInstancedRenderer {
 
   public beginFrame(): void {
     this.instanceCount = 0;
+    if (this.isUsingFallback2d()) {
+      this.fallback2d?.beginFrame();
+    }
   }
 
   public ensureCapacity(requiredCells: number): void {
@@ -274,6 +751,24 @@ export class WebGLInstancedRenderer {
     scale = 1,
     flags = 0
   ): void {
+    if (this.isUsingFallback2d()) {
+      this.fallback2d?.pushCell(
+        xPx,
+        yPx,
+        slot.char,
+        fgR,
+        fgG,
+        fgB,
+        fgA,
+        bgR,
+        bgG,
+        bgB,
+        bgA,
+        flags
+      );
+      return;
+    }
+
     const idx = this.instanceCount;
     if (idx >= this.capacity) {
       this.ensureCapacity(idx + 1);
@@ -332,8 +827,23 @@ export class WebGLInstancedRenderer {
       crtScanlineDensity: 1.5,
       bloomIntensity: 0,
       bloomThreshold: 0.55,
-    }
+      backdropOpacity: 0,
+    },
+    backdropSource: BackdropSource | null = null
   ): void {
+    if (this.isUsingFallback2d()) {
+      this.lastAtlas = atlas;
+      this.fallback2d?.flush(
+        atlas,
+        cellWidthPx,
+        cellHeightPx,
+        clearRgba,
+        postFx,
+        backdropSource
+      );
+      return;
+    }
+
     const gl = this.gl;
     if (!gl || this.contextLost || !this.program || !this.vao || !this.instanceVbo) {
       return;
@@ -354,6 +864,11 @@ export class WebGLInstancedRenderer {
       clearRgba[3]
     );
     gl.clear(gl.COLOR_BUFFER_BIT);
+
+    const backdropAlpha = Math.max(0, Math.min(1, postFx.backdropOpacity ?? 0));
+    if (backdropSource && backdropAlpha > 0.001) {
+      this.drawBackdropQuad(gl, backdropSource, backdropAlpha);
+    }
 
     if (this.instanceCount === 0) return;
 
@@ -383,6 +898,120 @@ export class WebGLInstancedRenderer {
     gl.bindVertexArray(null);
   }
 
+  /**
+   * Renders a GPU generative cell field directly from its offscreen FBO textures
+   * via `gl_InstanceID` without synchronous `gl.readPixels` CPU round-trips.
+   */
+  public flushGenerativeGrid(options: {
+    readonly atlas: GlyphAtlas;
+    readonly fieldTex: WebGLTexture;
+    readonly colorTex: WebGLTexture;
+    readonly cols: number;
+    readonly rows: number;
+    readonly rampChars: readonly string[];
+    readonly allowDirectional: boolean;
+    readonly directionalMinLum: number;
+    readonly invertGlyph: boolean;
+    readonly colorMode: 'source' | 'monochrome' | 'duotone';
+    readonly fgRgba: readonly [number, number, number, number];
+    readonly bgRgba: readonly [number, number, number, number];
+    readonly postFx: PostFxUniforms;
+  }): void {
+    const gl = this.gl;
+    if (
+      !gl ||
+      this.contextLost ||
+      !this.generativeProgram ||
+      !this.generativeVao
+    ) {
+      return;
+    }
+
+    const {
+      atlas,
+      fieldTex,
+      colorTex,
+      cols,
+      rows,
+      rampChars,
+      allowDirectional,
+      directionalMinLum,
+      invertGlyph,
+      colorMode,
+      fgRgba,
+      bgRgba,
+      postFx,
+    } = options;
+
+    this.lastAtlas = atlas;
+    const atlasTex = atlas.syncTexture(gl);
+    const rampLutTex = this.syncRampLutTexture(gl, atlas, rampChars);
+    if (!atlasTex || !rampLutTex) return;
+
+    const metrics = atlas.getMetrics();
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    gl.viewport(0, 0, width, height);
+
+    const clearR = bgRgba[0] / 255;
+    const clearG = bgRgba[1] / 255;
+    const clearB = bgRgba[2] / 255;
+    const clearA = bgRgba[3] / 255;
+    gl.clearColor(clearR * clearA, clearG * clearA, clearB * clearA, clearA);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    const instanceTotal = cols * rows;
+    if (instanceTotal <= 0 || rampChars.length === 0) return;
+
+    gl.useProgram(this.generativeProgram);
+    gl.bindVertexArray(this.generativeVao);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+    gl.uniform1i(this.ugAtlasTex, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, fieldTex);
+    gl.uniform1i(this.ugFieldTex, 1);
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, colorTex);
+    gl.uniform1i(this.ugColorTex, 2);
+
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, rampLutTex);
+    gl.uniform1i(this.ugRampLutTex, 3);
+
+    gl.uniform2f(this.ugViewportPx, width, height);
+    gl.uniform2f(this.ugCellSizePx, metrics.cellWidthPx, metrics.cellHeightPx);
+    gl.uniform1i(this.ugGridCols, cols);
+    gl.uniform1i(this.ugRampLen, rampChars.length);
+    gl.uniform1f(this.ugFirstRampIsSpace, rampChars[0] === ' ' ? 1 : 0);
+    gl.uniform1f(this.ugAllowDirectional, allowDirectional ? 1 : 0);
+    gl.uniform1f(this.ugDirectionalMinLum, directionalMinLum);
+    gl.uniform1ui(this.ugInvertFlag, invertGlyph ? CELL_FLAG_INVERT_GLYPH : 0);
+    gl.uniform1i(
+      this.ugColorMode,
+      colorMode === 'monochrome' ? 1 : colorMode === 'duotone' ? 2 : 0
+    );
+    gl.uniform4f(
+      this.ugFgColor,
+      fgRgba[0] / 255,
+      fgRgba[1] / 255,
+      fgRgba[2] / 255,
+      fgRgba[3] / 255
+    );
+    gl.uniform4f(this.ugBgColor, clearR, clearG, clearB, clearA);
+    gl.uniform1f(this.ugCrtIntensity, postFx.crtScanlineIntensity);
+    gl.uniform1f(this.ugCrtDensity, postFx.crtScanlineDensity);
+    gl.uniform1f(this.ugBloomIntensity, postFx.bloomIntensity);
+    gl.uniform1f(this.ugBloomThreshold, postFx.bloomThreshold);
+
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instanceTotal);
+    gl.bindVertexArray(null);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
   public dispose(): void {
     this.disposed = true;
     this.canvas.removeEventListener('webglcontextlost', this.handleContextLost);
@@ -392,15 +1021,120 @@ export class WebGLInstancedRenderer {
     if (gl && !gl.isContextLost()) {
       if (this.program) gl.deleteProgram(this.program);
       if (this.vao) gl.deleteVertexArray(this.vao);
+      if (this.generativeProgram) gl.deleteProgram(this.generativeProgram);
+      if (this.generativeVao) gl.deleteVertexArray(this.generativeVao);
+      if (this.backdropProgram) gl.deleteProgram(this.backdropProgram);
+      if (this.backdropTex) gl.deleteTexture(this.backdropTex);
+      if (this.rampLutTex) gl.deleteTexture(this.rampLutTex);
       if (this.quadVbo) gl.deleteBuffer(this.quadVbo);
       if (this.instanceVbo) gl.deleteBuffer(this.instanceVbo);
     }
 
     this.program = null;
     this.vao = null;
+    this.generativeProgram = null;
+    this.generativeVao = null;
+    this.backdropProgram = null;
+    this.backdropTex = null;
+    this.rampLutTex = null;
+    this.lastRampCacheKey = '';
     this.quadVbo = null;
     this.instanceVbo = null;
     this.gl = null;
+  }
+
+  private syncRampLutTexture(
+    gl: WebGL2RenderingContext,
+    atlas: GlyphAtlas,
+    rampChars: readonly string[]
+  ): WebGLTexture | null {
+    const metrics = atlas.getMetrics();
+    const key = `${metrics.fontFamily}|${metrics.cellWidthPx}x${metrics.cellHeightPx}|${metrics.atlasWidth}x${metrics.atlasHeight}|${rampChars.join('')}`;
+    const totalEntries = rampChars.length + 4;
+
+    if (!this.rampLutTex) {
+      this.rampLutTex = gl.createTexture();
+      if (!this.rampLutTex) return null;
+      this.lastRampCacheKey = '';
+    }
+
+    if (key === this.lastRampCacheKey && this.rampLutU16.length >= totalEntries * 4) {
+      return this.rampLutTex;
+    }
+
+    if (this.rampLutU16.length < totalEntries * 4) {
+      this.rampLutU16 = new Uint16Array(totalEntries * 4);
+    }
+
+    const dirGlyphs = ['|', '/', '-', '\\'] as const;
+    for (let i = 0; i < totalEntries; i += 1) {
+      const ch = i < rampChars.length ? (rampChars[i] ?? ' ') : (dirGlyphs[i - rampChars.length] ?? '|');
+      const slot = atlas.getOrInsertGlyph(ch);
+      const b = i * 4;
+      if (slot) {
+        this.rampLutU16[b] = slot.u0Norm;
+        this.rampLutU16[b + 1] = slot.v0Norm;
+        this.rampLutU16[b + 2] = slot.uWNorm;
+        this.rampLutU16[b + 3] = slot.vHNorm;
+      } else {
+        this.rampLutU16[b] = 0;
+        this.rampLutU16[b + 1] = 0;
+        this.rampLutU16[b + 2] = 0;
+        this.rampLutU16[b + 3] = 0;
+      }
+    }
+
+    // Re-sync atlas in case missing glyphs were inserted lazily while packing LUT.
+    atlas.syncTexture(gl);
+
+    gl.bindTexture(gl.TEXTURE_2D, this.rampLutTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA16UI,
+      totalEntries,
+      1,
+      0,
+      gl.RGBA_INTEGER,
+      gl.UNSIGNED_SHORT,
+      this.rampLutU16.subarray(0, totalEntries * 4)
+    );
+
+    this.lastRampCacheKey = key;
+    return this.rampLutTex;
+  }
+
+  private drawBackdropQuad(
+    gl: WebGL2RenderingContext,
+    source: BackdropSource,
+    opacity: number
+  ): void {
+    if (!this.backdropProgram || !this.generativeVao) return;
+    if (!this.backdropTex) {
+      this.backdropTex = gl.createTexture();
+      if (!this.backdropTex) return;
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, this.backdropTex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+
+    gl.useProgram(this.backdropProgram);
+    gl.bindVertexArray(this.generativeVao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.backdropTex);
+    gl.uniform1i(this.ubBackdropTex, 0);
+    gl.uniform1f(this.ubBackdropOpacity, opacity);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
   }
 
   private initGpuResources(): void {
@@ -414,6 +1148,8 @@ export class WebGLInstancedRenderer {
 
     if (!gl) {
       this.contextLost = true;
+      this.fallback2d = new Canvas2DRenderer(this.canvas);
+      this.usingFallback2d = this.fallback2d.hasContext();
       return;
     }
 
@@ -487,6 +1223,56 @@ export class WebGLInstancedRenderer {
 
     gl.bindVertexArray(null);
 
+    const genVert = compileShader(gl, gl.VERTEX_SHADER, GENERATIVE_GRID_VERT_SOURCE);
+    const genFrag = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER_SOURCE);
+    const genProgram = gl.createProgram();
+    if (!genProgram) {
+      gl.deleteShader(genVert);
+      gl.deleteShader(genFrag);
+      throw new Error('Failed to create generative WebGLProgram.');
+    }
+    gl.attachShader(genProgram, genVert);
+    gl.attachShader(genProgram, genFrag);
+    gl.linkProgram(genProgram);
+    gl.deleteShader(genVert);
+    gl.deleteShader(genFrag);
+
+    if (!gl.getProgramParameter(genProgram, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(genProgram) ?? 'unknown link error';
+      gl.deleteProgram(genProgram);
+      throw new Error(`Generative grid program link failed: ${log}`);
+    }
+
+    const genVao = gl.createVertexArray();
+    if (!genVao) {
+      throw new Error('Failed to allocate generative VAO.');
+    }
+    gl.bindVertexArray(genVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadVbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+
+    const bdVert = compileShader(gl, gl.VERTEX_SHADER, BACKDROP_VERT_SOURCE);
+    const bdFrag = compileShader(gl, gl.FRAGMENT_SHADER, BACKDROP_FRAG_SOURCE);
+    const bdProgram = gl.createProgram();
+    if (!bdProgram) {
+      gl.deleteShader(bdVert);
+      gl.deleteShader(bdFrag);
+      throw new Error('Failed to create backdrop WebGLProgram.');
+    }
+    gl.attachShader(bdProgram, bdVert);
+    gl.attachShader(bdProgram, bdFrag);
+    gl.linkProgram(bdProgram);
+    gl.deleteShader(bdVert);
+    gl.deleteShader(bdFrag);
+
+    if (!gl.getProgramParameter(bdProgram, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(bdProgram) ?? 'unknown link error';
+      gl.deleteProgram(bdProgram);
+      throw new Error(`Backdrop program link failed: ${log}`);
+    }
+
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -495,6 +1281,12 @@ export class WebGLInstancedRenderer {
     this.vao = vao;
     this.quadVbo = quadVbo;
     this.instanceVbo = instanceVbo;
+    this.generativeProgram = genProgram;
+    this.generativeVao = genVao;
+    this.backdropProgram = bdProgram;
+
+    this.ubBackdropTex = gl.getUniformLocation(bdProgram, 'u_backdropTex');
+    this.ubBackdropOpacity = gl.getUniformLocation(bdProgram, 'u_backdropOpacity');
 
     this.uViewportPx = gl.getUniformLocation(program, 'u_viewportPx');
     this.uCellSizePx = gl.getUniformLocation(program, 'u_cellSizePx');
@@ -503,5 +1295,25 @@ export class WebGLInstancedRenderer {
     this.uCrtDensity = gl.getUniformLocation(program, 'u_crtScanlineDensity');
     this.uBloomIntensity = gl.getUniformLocation(program, 'u_bloomIntensity');
     this.uBloomThreshold = gl.getUniformLocation(program, 'u_bloomThreshold');
+
+    this.ugAtlasTex = gl.getUniformLocation(genProgram, 'u_atlasTex');
+    this.ugFieldTex = gl.getUniformLocation(genProgram, 'u_fieldTex');
+    this.ugColorTex = gl.getUniformLocation(genProgram, 'u_colorTex');
+    this.ugRampLutTex = gl.getUniformLocation(genProgram, 'u_rampLutTex');
+    this.ugViewportPx = gl.getUniformLocation(genProgram, 'u_viewportPx');
+    this.ugCellSizePx = gl.getUniformLocation(genProgram, 'u_cellSizePx');
+    this.ugGridCols = gl.getUniformLocation(genProgram, 'u_gridCols');
+    this.ugRampLen = gl.getUniformLocation(genProgram, 'u_rampLen');
+    this.ugFirstRampIsSpace = gl.getUniformLocation(genProgram, 'u_firstRampIsSpace');
+    this.ugAllowDirectional = gl.getUniformLocation(genProgram, 'u_allowDirectional');
+    this.ugDirectionalMinLum = gl.getUniformLocation(genProgram, 'u_directionalMinLum');
+    this.ugInvertFlag = gl.getUniformLocation(genProgram, 'u_invertFlag');
+    this.ugColorMode = gl.getUniformLocation(genProgram, 'u_colorMode');
+    this.ugFgColor = gl.getUniformLocation(genProgram, 'u_fgColor');
+    this.ugBgColor = gl.getUniformLocation(genProgram, 'u_bgColor');
+    this.ugCrtIntensity = gl.getUniformLocation(genProgram, 'u_crtScanlineIntensity');
+    this.ugCrtDensity = gl.getUniformLocation(genProgram, 'u_crtScanlineDensity');
+    this.ugBloomIntensity = gl.getUniformLocation(genProgram, 'u_bloomIntensity');
+    this.ugBloomThreshold = gl.getUniformLocation(genProgram, 'u_bloomThreshold');
   }
 }

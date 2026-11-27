@@ -34,8 +34,16 @@ export default function AsciiStudioPage() {
     onPointerUp,
   } = useAsciiEngine('classic-density');
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+
+  // Open docked inspector by default on desktop/tablet viewports (>= 768px)
+  // while keeping mobile (< 768px) unobstructed on initial load.
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+      setSidebarOpen(true);
+    }
+  }, []);
 
   const quickStyleIds = useMemo(
     () => styleRegistry.listAllStyles().map((s) => s.id),
@@ -138,7 +146,7 @@ export default function AsciiStudioPage() {
 
         {/* Docked Desktop Inspector / Collapsible Mobile Drawer */}
         {sidebarOpen && (
-          <div className="absolute inset-y-0 right-0 z-30 w-80 border-l border-zinc-800/80 bg-zinc-950 shadow-2xl md:static md:w-[340px] lg:w-[360px] md:shadow-none">
+          <div className="absolute inset-y-0 right-0 z-30 w-80 max-w-[88vw] border-l border-zinc-800/80 bg-zinc-950 shadow-2xl md:static md:w-[360px] lg:w-[384px] md:shadow-none">
             <StyleControlsPanel
               snapshot={snapshot}
               onSelectStyle={setStyle}

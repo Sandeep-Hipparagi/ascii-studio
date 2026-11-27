@@ -76,6 +76,7 @@ const SERVER_SNAPSHOT: AsciiEngineSnapshot = {
     crtScanlineDensity: 1.5,
     bloomIntensity: 0,
     bloomThreshold: 0.55,
+    backdropOpacity: 0,
   },
   realtimeParams: {},
   generativeParams: {},
@@ -142,35 +143,74 @@ function createProceduralSampleCanvas(presetId: SamplePresetId): HTMLCanvasEleme
     return canvas;
   }
 
-  // Default: Studio Calibration Card (sphere + step wedge + diagonals for Sobel)
-  const bg = ctx.createLinearGradient(0, 0, w, h);
-  bg.addColorStop(0, '#090d16');
-  bg.addColorStop(1, '#1c2536');
+  // Default: Rich borderless Nebula Sculpture studio showcase (zero outer frame)
+  const bg = ctx.createRadialGradient(w * 0.52, h * 0.48, 24, w * 0.5, h * 0.5, w * 0.68);
+  bg.addColorStop(0, '#0f172a');
+  bg.addColorStop(0.55, '#070b18');
+  bg.addColorStop(1, '#020308');
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, w, h);
 
-  // Luminance step bars
-  for (let i = 0; i < 8; i += 1) {
-    const v = Math.round((i / 7) * 255);
-    ctx.fillStyle = `rgb(${v},${v},${v})`;
-    ctx.fillRect(36 + i * 71, 32, 66, 38);
-  }
+  // Volumetric cyan/magenta nebula plumes for tonal range across density & dithering
+  const plumeCyan = ctx.createRadialGradient(w * 0.28, h * 0.34, 10, w * 0.3, h * 0.36, 250);
+  plumeCyan.addColorStop(0, 'rgba(56, 189, 248, 0.72)');
+  plumeCyan.addColorStop(0.45, 'rgba(37, 99, 235, 0.34)');
+  plumeCyan.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = plumeCyan;
+  ctx.fillRect(0, 0, w, h);
 
-  // Shaded sphere
-  const sphere = ctx.createRadialGradient(w * 0.43, h * 0.44, 14, w * 0.5, h * 0.56, 155);
+  const plumeMagenta = ctx.createRadialGradient(w * 0.72, h * 0.64, 12, w * 0.7, h * 0.62, 240);
+  plumeMagenta.addColorStop(0, 'rgba(244, 63, 94, 0.65)');
+  plumeMagenta.addColorStop(0.45, 'rgba(168, 85, 247, 0.3)');
+  plumeMagenta.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = plumeMagenta;
+  ctx.fillRect(0, 0, w, h);
+
+  // Tilted luminous accretion ring behind sculpture
+  ctx.save();
+  ctx.translate(w * 0.5, h * 0.5);
+  ctx.rotate(-0.34);
+  const ringGrad = ctx.createLinearGradient(-230, 0, 230, 0);
+  ringGrad.addColorStop(0, 'rgba(56, 189, 248, 0.15)');
+  ringGrad.addColorStop(0.35, 'rgba(125, 211, 252, 0.92)');
+  ringGrad.addColorStop(0.65, 'rgba(251, 191, 36, 0.88)');
+  ringGrad.addColorStop(1, 'rgba(244, 63, 94, 0.18)');
+  ctx.strokeStyle = ringGrad;
+  ctx.lineWidth = 14;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 225, 58, 0, Math.PI, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  // Key-lit iridescent sculpture sphere with soft rim highlight
+  const sphere = ctx.createRadialGradient(w * 0.42, h * 0.39, 10, w * 0.5, h * 0.5, 146);
   sphere.addColorStop(0, '#ffffff');
-  sphere.addColorStop(0.35, '#67e8f9');
-  sphere.addColorStop(0.75, '#1d4ed8');
-  sphere.addColorStop(1, '#050811');
+  sphere.addColorStop(0.24, '#bae6fd');
+  sphere.addColorStop(0.55, '#3b82f6');
+  sphere.addColorStop(0.84, '#4c1d95');
+  sphere.addColorStop(1, '#090d1a');
   ctx.fillStyle = sphere;
   ctx.beginPath();
-  ctx.arc(w * 0.5, h * 0.56, 150, 0, Math.PI * 2);
+  ctx.arc(w * 0.5, h * 0.5, 144, 0, Math.PI * 2);
   ctx.fill();
 
-  // Crisp edge frame
-  ctx.strokeStyle = '#f8fafc';
-  ctx.lineWidth = 3;
-  ctx.strokeRect(24, 90, w - 48, h - 118);
+  // Warm rim crescent along lower-right edge for strong Sobel & Braille silhouette
+  ctx.strokeStyle = 'rgba(251, 146, 60, 0.85)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.arc(w * 0.5, h * 0.5, 142, 0.12, 1.35);
+  ctx.stroke();
+
+  // Foreground half of orbital ring passing across sphere
+  ctx.save();
+  ctx.translate(w * 0.5, h * 0.5);
+  ctx.rotate(-0.34);
+  ctx.strokeStyle = ringGrad;
+  ctx.lineWidth = 14;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 225, 58, 0, 0, Math.PI);
+  ctx.stroke();
+  ctx.restore();
 
   return canvas;
 }
@@ -233,7 +273,15 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
     });
     observer.observe(container);
 
+    let cancelled = false;
+    void engine.refreshFonts().then((rebuilt) => {
+      if (!cancelled && rebuilt) {
+        syncSize();
+      }
+    });
+
     return () => {
+      cancelled = true;
       observer.disconnect();
       stopWebcamStream();
       revokeObjectUrl();

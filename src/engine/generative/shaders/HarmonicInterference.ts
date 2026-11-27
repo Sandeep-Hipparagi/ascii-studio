@@ -111,16 +111,17 @@ vec4 evaluateCell(vec2 cellCoord, vec2 gridDims, float time) {
 
   float luminance = clamp(0.5 + 0.5 * field, 0.0, 1.0);
   float angle = atan(dy, dx);
+  float palT = fract(luminance * 0.85 + t * 0.05);
   vec3 pal = cosinePalette(
-    luminance + t * 0.05,
+    palT,
     vec3(0.5),
     vec3(0.5),
     vec3(1.0),
     vec3(0.0, 0.33, 0.67)
   );
-  float paletteIdx = luminance709(pal);
+  emitCellRgb(pal * (0.45 + 0.55 * luminance));
 
-  return vec4(luminance, angle, paletteIdx, 1.0);
+  return vec4(luminance, angle, palT, 1.0);
 }
 `,
 };

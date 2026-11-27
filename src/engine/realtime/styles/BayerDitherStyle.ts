@@ -9,13 +9,16 @@ import {
   BAYER_MATRIX_4,
   BAYER_MATRIX_8,
   REALTIME_RAMP_PRESETS,
+  RealtimeBufferPool,
   clamp01,
-  extractGradedLuminanceField,
-  gradeSourceRgba,
+  extractGradedLuminanceFieldInto,
+  gradeSourceRgbaInto,
   readBooleanParam,
   readNumberParam,
   readStringParam,
 } from './shared';
+
+const bayerPool = new RealtimeBufferPool();
 
 export const BayerDitherStyle: RealtimeStylePlugin = {
   mode: 'realtime',
@@ -75,6 +78,17 @@ export const BayerDitherStyle: RealtimeStylePlugin = {
       default: 'none',
     },
     {
+      id: 'shadowCutoff',
+      uniformName: 'u_shadowCutoff',
+      label: 'Shadow Cutoff',
+      kind: 'slider',
+      group: 'grading',
+      min: 0,
+      max: 0.3,
+      step: 0.01,
+      default: 0.06,
+    },
+    {
       id: 'contrast',
       uniformName: 'u_contrast',
       label: 'Contrast',
@@ -109,30 +123,50 @@ export const BayerDitherStyle: RealtimeStylePlugin = {
       paletteLock === '1bit' ? 2 : paletteLock === '4bit' ? 16 : rawSteps;
     const maxLevel = steps - 1;
 
+    const shadowCutoff = readNumberParam(params, 'shadowCutoff', 0.06);
     const contrast = readNumberParam(params, 'contrast', 0.12);
     const invert = readBooleanParam(params, 'invert', false);
 
-    const luma = extractGradedLuminanceField(rgba, cellCount, {
-      brightness: 0,
-      contrast,
-      gamma: 1.0,
-      invert,
-    });
-    const rgb = gradeSourceRgba(rgba, cellCount, 0, contrast, invert);
-    const field = new Float32Array(cellCount * 4);
-    const ramp = Array.from(REALTIME_RAMP_PRESETS.blocks);
-    const glyphs: string[] = new Array(cellCount);
+    const { luma, gradedRgb: rgb, field, glyphs } = bayerPool.acquire(cols, rows, cellCount);
+    extractGradedLuminanceFieldInto(
+      rgba,
+      cellCount,
+      {
+        brightness: 0,
+        contrast,
+        gamma: 1.0,
+        invert,
+      },
+      luma
+    );
+    gradeSourceRgbaInto(rgba, cellCount, 0, contrast, invert, rgb);
+    const ramp = bayerPool.getRampChars(REALTIME_RAMP_PRESETS.blocks);
 
     for (let r = 0; r < rows; r += 1) {
       for (let c = 0; c < cols; c += 1) {
         const idx = r * cols + c;
+        const p4 = idx * 4;
+        const alpha = (rgba[p4 + 3] ?? 255) / 255;
+        const rawLum = luma[idx] ?? 0;
+
+        if (rawLum < shadowCutoff) {
+          rgb[p4] = 0;
+          rgb[p4 + 1] = 0;
+          rgb[p4 + 2] = 0;
+          field[p4] = 0;
+          field[p4 + 1] = 0;
+          field[p4 + 2] = 0;
+          field[p4 + 3] = alpha;
+          glyphs[idx] = ' ';
+          continue;
+        }
+
         const threshold = matrix[(r & dimMask) * dim + (c & dimMask)] ?? 0.5;
         const delta = (threshold - 0.5) * ditherSpread;
 
-        const yPerturbed = clamp01((luma[idx] ?? 0) + delta);
+        const yPerturbed = clamp01(rawLum + delta);
         const yQuant = Math.round(yPerturbed * maxLevel) / maxLevel;
 
-        const p4 = idx * 4;
         if (paletteLock === '1bit') {
           const monoByte = yQuant >= 0.5 ? 255 : 0;
           rgb[p4] = monoByte;
@@ -145,7 +179,6 @@ export const BayerDitherStyle: RealtimeStylePlugin = {
           }
         }
 
-        const alpha = (rgba[p4 + 3] ?? 255) / 255;
         field[p4] = yQuant;
         field[p4 + 1] = 0;
         field[p4 + 2] = yQuant;

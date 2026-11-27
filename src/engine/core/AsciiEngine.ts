@@ -57,6 +57,8 @@ function resolveRampChars(rampOrId: string): string {
   return BUILTIN_RAMPS[rampOrId] ?? (rampOrId.length > 0 ? rampOrId : DEFAULT_RAMP);
 }
 
+const DIRECTIONAL_MIN_LUMINANCE = 0.14;
+
 const GENERATIVE_VERT_GLSL = `#version 300 es
 layout(location = 0) in vec2 a_corner;
 out vec2 v_uv;
@@ -73,12 +75,17 @@ interface GlslPluginRunner {
   ubo: WebGLBuffer;
   fboA: WebGLFramebuffer;
   texA: WebGLTexture;
+  texColorA: WebGLTexture;
   fboB: WebGLFramebuffer;
   texB: WebGLTexture;
+  texColorB: WebGLTexture;
   pingIndex: 0 | 1;
+  hasRenderedPass: boolean;
   cols: number;
   rows: number;
   readbackBuf: Uint8Array;
+  colorReadbackBuf: Uint8Array;
+  colorOutBuf: Uint8ClampedArray;
   uboData: ArrayBuffer;
   uboF32: Float32Array;
   uboU32: Uint32Array;
@@ -100,6 +107,8 @@ export class AsciiEngine {
   private workerSim: WorkerGridSimulation | null = null;
   private rdWorkerBridge: ReactionDiffusionWorkerBridge | null = null;
   private workerFieldBuf = new Float32Array(0);
+  private gradedWorkerFieldBuf = new Float32Array(0);
+  private gradedRgbaScratch = new Uint8ClampedArray(0);
   private glslRunner: GlslPluginRunner | null = null;
   private lastCellOutput: (CellFieldOutput & Partial<RealtimeStyleOutput>) | null = null;
 
@@ -114,6 +123,7 @@ export class AsciiEngine {
 
   private rampChars: string[];
   private rampString: string;
+  private activeRampIsDensePreset = false;
   private filterMode: AtlasFilterMode = 'linear';
   private grading: MediaGradingParams = { ...DEFAULT_MEDIA_GRADING };
   private palette: PaletteConfig = {
@@ -126,12 +136,14 @@ export class AsciiEngine {
     crtScanlineDensity: 1.5,
     bloomIntensity: 0,
     bloomThreshold: 0.55,
+    backdropOpacity: 0,
   };
 
   // Scheduling & Loop Decoupling
   private isPlaying = true;
   private dirty = true;
   private exportHold = false;
+  private disposed = false;
   private loopGeneration = 0;
   private continuousRafId: number | null = null;
   private dirtyRafId: number | null = null;
@@ -365,7 +377,11 @@ export class AsciiEngine {
   public captureCellBuffer(): CellBuffer {
     const metrics = this.atlas.getMetrics();
     const { cols: fallbackCols, rows: fallbackRows } = this.computeGridDims();
-    const output = this.lastCellOutput;
+    const output =
+      this.sourceKind === 'generative' &&
+      this.activePlugin?.executionMode === 'glsl-fragment'
+        ? this.readbackGlslRunnerForExport() ?? this.lastCellOutput
+        : this.lastCellOutput;
 
     if (!output) {
       const count = fallbackCols * fallbackRows;
@@ -441,9 +457,12 @@ export class AsciiEngine {
 
   public setRamp(ramp: string, sortByDensity = false): void {
     const resolved = resolveRampChars(ramp);
-    this.rampString = sortByDensity
-      ? this.atlas.sortRampByVisualDensity(resolved)
-      : resolved;
+    const isDensePreset = ramp === 'dense' || ramp === BUILTIN_RAMPS.dense;
+    this.activeRampIsDensePreset = isDensePreset;
+    this.rampString =
+      sortByDensity || isDensePreset
+        ? this.atlas.sortRampByVisualDensity(resolved)
+        : resolved;
     this.rampChars = Array.from(this.rampString);
     this.atlas.ensureGlyphs(this.rampString);
     this.markDirty();
@@ -586,7 +605,25 @@ export class AsciiEngine {
     }
   }
 
+  public async refreshFonts(): Promise<boolean> {
+    if (this.disposed) return false;
+    const rebuilt = await this.atlas.refreshAfterFontsReady();
+    if (this.disposed || !rebuilt) return false;
+
+    if (this.activeRampIsDensePreset) {
+      this.rampString = this.atlas.sortRampByVisualDensity(resolveRampChars('dense'));
+      this.rampChars = Array.from(this.rampString);
+      this.atlas.ensureGlyphs(this.rampString);
+    }
+
+    this.media.markDirty();
+    this.markDirty();
+    this.scheduleUiNotify();
+    return true;
+  }
+
   public dispose(): void {
+    this.disposed = true;
     this.cancelLoops();
     if (this.uiNotifyRafId !== null) {
       cancelAnimationFrame(this.uiNotifyRafId);
@@ -676,7 +713,7 @@ export class AsciiEngine {
   }
 
   private renderStep(_nowMs: number, dtSec: number, force: boolean): boolean {
-    if (this.renderer.isContextLost()) return false;
+    if (!this.renderer.canRender()) return false;
 
     const metrics = this.atlas.getMetrics();
     const viewW = this.canvas.width;
@@ -707,13 +744,15 @@ export class AsciiEngine {
           force
         );
         if (!sample) return false;
+        const gradedRgba = this.applyGlobalGradingToRgba(sample.rgba);
         cellField = this.activeRealtimePlugin.process({
           cols: sample.cols,
           rows: sample.rows,
-          rgba: sample.rgba,
+          rgba: gradedRgba,
           subSampleWidth: sample.sampleW,
           subSampleHeight: sample.sampleH,
           params: this.realtimeParams,
+          grading: this.grading,
         });
       } else {
         cellField = this.media.processFrame(
@@ -729,6 +768,33 @@ export class AsciiEngine {
       if (this.isPlaying && dtSec > 0) {
         this.elapsedGenSec += dtSec;
       }
+
+      if (this.activePlugin.executionMode === 'glsl-fragment') {
+        if (!this.renderer.isUsingFallback2d()) {
+          const gpuPass = this.executeGlslRunnerPass(this.activePlugin, cols, rows, dtSec);
+          this.frameCounter += 1;
+          if (!gpuPass) return false;
+
+          this.lastCellOutput = null;
+          this.renderer.flushGenerativeGrid({
+            atlas: this.atlas,
+            fieldTex: gpuPass.fieldTex,
+            colorTex: gpuPass.colorTex,
+            cols,
+            rows,
+            rampChars: this.rampChars,
+            allowDirectional: Boolean(this.activePlugin.supportsDirectionalGlyphs),
+            directionalMinLum: DIRECTIONAL_MIN_LUMINANCE,
+            invertGlyph: this.grading.invert,
+            colorMode: this.palette.colorMode,
+            fgRgba: this.palette.fgRgba,
+            bgRgba: this.palette.bgRgba,
+            postFx: this.postFx,
+          });
+          return true;
+        }
+      }
+
       cellField = this.evaluateGenerativeField(this.activePlugin, cols, rows, dtSec);
       this.frameCounter += 1;
     }
@@ -738,12 +804,18 @@ export class AsciiEngine {
     this.lastCellOutput = cellField;
     this.submitCellsToBatcher(cellField, metrics);
     const bg = this.palette.bgRgba;
+    const backdropSurface =
+      this.sourceKind === 'media' && (this.postFx.backdropOpacity ?? 0) > 0.001
+        ? this.media.getBlurredBackdropSurface(viewW, viewH, this.grading.fitMode)
+        : null;
+
     this.renderer.flush(
       this.atlas,
       metrics.cellWidthPx,
       metrics.cellHeightPx,
       [bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255],
-      this.postFx
+      this.postFx,
+      backdropSurface
     );
 
     return true;
@@ -791,10 +863,10 @@ export class AsciiEngine {
     } else {
       const edgeVal = edgeStrength
         ? (edgeStrength[idx] ?? 0)
-        : Math.abs(angle) > 1e-3
+        : Math.abs(angle) > 1e-3 && lum >= DIRECTIONAL_MIN_LUMINANCE
           ? 1
           : 0;
-      if (allowDirectional && edgeVal >= edgeThresh && (edgeStrength || Math.abs(angle) > 0)) {
+      if (allowDirectional && edgeVal >= edgeThresh && (edgeStrength || (Math.abs(angle) > 1e-3 && lum >= DIRECTIONAL_MIN_LUMINANCE))) {
         ch = quantizeAngleToGlyph(angle);
         flags |= CELL_FLAG_EDGE_EMPHASIS;
       } else {
@@ -814,12 +886,19 @@ export class AsciiEngine {
     let fgB = fgDefB;
     const fgA = Math.round(fgDefA * alpha);
 
-    if (colorMode === 'source' && rgb) {
-      fgR = rgb[fBase] ?? fgDefR;
-      fgG = rgb[fBase + 1] ?? fgDefG;
-      fgB = rgb[fBase + 2] ?? fgDefB;
+    if (colorMode === 'source') {
+      if (rgb) {
+        fgR = rgb[fBase] ?? fgDefR;
+        fgG = rgb[fBase + 1] ?? fgDefG;
+        fgB = rgb[fBase + 2] ?? fgDefB;
+      } else if (this.sourceKind === 'generative' && paletteIdx > 0.001) {
+        const twoPi = Math.PI * 2;
+        fgR = Math.round((0.5 + 0.5 * Math.cos(twoPi * paletteIdx)) * 255);
+        fgG = Math.round((0.5 + 0.5 * Math.cos(twoPi * (paletteIdx + 0.33))) * 255);
+        fgB = Math.round((0.5 + 0.5 * Math.cos(twoPi * (paletteIdx + 0.67))) * 255);
+      }
     } else if (colorMode === 'duotone') {
-      const t = rgb ? lum : paletteIdx;
+      const t = this.sourceKind === 'generative' ? paletteIdx : rgb ? lum : paletteIdx;
       fgR = Math.round(bgR + (fgDefR - bgR) * t);
       fgG = Math.round(bgG + (fgDefG - bgG) * t);
       fgB = Math.round(bgB + (fgDefB - bgB) * t);
@@ -891,7 +970,7 @@ export class AsciiEngine {
           return {
             cols,
             rows,
-            field: workerLatest.subarray(0, cellCount * 4),
+            field: this.applyGlobalGradingToField(workerLatest.subarray(0, cellCount * 4), cellCount),
           };
         }
       }
@@ -910,10 +989,86 @@ export class AsciiEngine {
       return {
         cols,
         rows,
-        field: this.workerFieldBuf.subarray(0, cellCount * 4),
+        field: this.applyGlobalGradingToField(this.workerFieldBuf.subarray(0, cellCount * 4), cellCount),
       };
     }
 
+    if (this.renderer.isUsingFallback2d() || !this.renderer.getContext() || !this.glslRunner) {
+      return this.evaluateGenerativeCpuFallback(plugin, cols, rows);
+    }
+
+    const gpuPass = this.executeGlslRunnerPass(plugin, cols, rows, dtSec);
+    if (!gpuPass) return null;
+    return this.readbackGlslRunnerForExport();
+  }
+
+  /**
+   * Lightweight CPU procedural fallback when WebGL2 is unavailable so Canvas2D
+   * fallback mode still animates `glsl-fragment` generative presets smoothly.
+   */
+  private evaluateGenerativeCpuFallback(
+    plugin: Extract<GenerativeStylePlugin, { executionMode: 'glsl-fragment' }>,
+    cols: number,
+    rows: number
+  ): CellFieldOutput {
+    const cellCount = cols * rows;
+    if (this.workerFieldBuf.length < cellCount * 4) {
+      this.workerFieldBuf = new Float32Array(cellCount * 4);
+    }
+    const out = this.workerFieldBuf.subarray(0, cellCount * 4);
+    const t = this.elapsedGenSec;
+    const isFlow = plugin.id === 'simplex-flow-field';
+    const isHarmonic = plugin.id === 'harmonic-interference';
+
+    for (let r = 0; r < rows; r += 1) {
+      const ny = (r + 0.5) / Math.max(1, rows) - 0.5;
+      for (let c = 0; c < cols; c += 1) {
+        const nx = (c + 0.5) / Math.max(1, cols) - 0.5;
+        const b = (r * cols + c) * 4;
+        let lum = 0.5;
+        let angle = 0;
+        let pal = 0;
+
+        if (isHarmonic) {
+          const d1 = Math.hypot(nx - 0.2 * Math.sin(t * 0.6), ny - 0.2 * Math.cos(t * 0.5));
+          const d2 = Math.hypot(nx + 0.2 * Math.cos(t * 0.4), ny + 0.2 * Math.sin(t * 0.7));
+          const wave = 0.5 * (Math.sin(d1 * 18 - t * 2.4) + Math.sin(d2 * 18 - t * 2.1));
+          lum = Math.max(0, Math.min(1, 0.5 + 0.5 * wave));
+          pal = (lum * 0.85 + t * 0.05) % 1;
+        } else {
+          const vx = Math.sin(nx * 5.5 + t * 0.8) * Math.cos(ny * 4.5 - t * 0.5);
+          const vy = Math.cos(nx * 4.5 - t * 0.6) * Math.sin(ny * 5.5 + t * 0.7);
+          const mag = Math.hypot(vx, vy);
+          lum = Math.max(0, Math.min(1, isFlow ? (mag - 0.2) * 1.1 : 0.5 + 0.5 * vx));
+          angle = isFlow ? Math.atan2(vy, vx) : 0;
+          pal = ((0.5 + 0.5 * Math.sin(nx * 3 + ny * 3 + t * 0.35)) % 1 + 1) % 1;
+        }
+
+        out[b] = lum;
+        out[b + 1] = angle;
+        out[b + 2] = pal;
+        out[b + 3] = 1;
+      }
+    }
+
+    return {
+      cols,
+      rows,
+      field: this.applyGlobalGradingToField(out, cellCount),
+    };
+  }
+
+  /**
+   * Executes the GPU generative fragment shader pass into offscreen MRT FBO
+   * attachments (`COLOR_ATTACHMENT0` field + `COLOR_ATTACHMENT1` RGB) without
+   * issuing a blocking `gl.readPixels` stall.
+   */
+  private executeGlslRunnerPass(
+    plugin: Extract<GenerativeStylePlugin, { executionMode: 'glsl-fragment' }>,
+    cols: number,
+    rows: number,
+    dtSec: number
+  ): { readonly fieldTex: WebGLTexture; readonly colorTex: WebGLTexture } | null {
     const gl = this.renderer.getContext();
     if (!gl || !this.glslRunner) return null;
 
@@ -921,6 +1076,8 @@ export class AsciiEngine {
     const runner = this.glslRunner;
     const prevTex = runner.pingIndex === 0 ? runner.texA : runner.texB;
     const dstFbo = runner.pingIndex === 0 ? runner.fboB : runner.fboA;
+    const dstFieldTex = runner.pingIndex === 0 ? runner.texB : runner.texA;
+    const dstColorTex = runner.pingIndex === 0 ? runner.texColorB : runner.texColorA;
 
     // Update StudioFrame UBO
     const metrics = this.atlas.getMetrics();
@@ -942,8 +1099,13 @@ export class AsciiEngine {
     runner.uboF32[17] = this.pointerState[1];
     runner.uboF32[18] = this.pointerState[2];
     runner.uboF32[19] = this.pointerState[3];
+    runner.uboF32[20] = this.grading.brightness;
+    runner.uboF32[21] = this.grading.contrast;
+    runner.uboF32[22] = this.grading.gamma;
+    runner.uboF32[23] = 0;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, dstFbo);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
     gl.viewport(0, 0, cols, rows);
     gl.useProgram(runner.program);
 
@@ -963,28 +1125,77 @@ export class AsciiEngine {
     gl.bindVertexArray(runner.vao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
-
-    if (runner.readbackBuf.length < cellCount * 4) {
-      runner.readbackBuf = new Uint8Array(cellCount * 4);
-    }
-    gl.readPixels(0, 0, cols, rows, gl.RGBA, gl.UNSIGNED_BYTE, runner.readbackBuf);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     runner.pingIndex = runner.pingIndex === 0 ? 1 : 0;
+    runner.hasRenderedPass = true;
+    return { fieldTex: dstFieldTex, colorTex: dstColorTex };
+  }
+
+  /**
+   * Lazy export-only CPU readback of the latest generative FBO textures for
+   * plain-text, ANSI, and SVG exporters.
+   */
+  private readbackGlslRunnerForExport(): CellFieldOutput | null {
+    const gl = this.renderer.getContext();
+    const runner = this.glslRunner;
+    if (!gl || !runner || !runner.hasRenderedPass || runner.cols <= 0 || runner.rows <= 0) return null;
+
+    const { cols, rows } = runner;
+    const cellCount = cols * rows;
+    if (this.workerFieldBuf.length < cellCount * 4) {
+      this.workerFieldBuf = new Float32Array(cellCount * 4);
+    }
+    if (runner.readbackBuf.length < cellCount * 4) {
+      runner.readbackBuf = new Uint8Array(cellCount * 4);
+    }
+    if (runner.colorReadbackBuf.length < cellCount * 4) {
+      runner.colorReadbackBuf = new Uint8Array(cellCount * 4);
+    }
+    if (runner.colorOutBuf.length < cellCount * 4) {
+      runner.colorOutBuf = new Uint8ClampedArray(cellCount * 4);
+    }
+
+    const activeFbo = runner.pingIndex === 1 ? runner.fboB : runner.fboA;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, activeFbo);
+    gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    gl.readPixels(0, 0, cols, rows, gl.RGBA, gl.UNSIGNED_BYTE, runner.readbackBuf);
+    gl.readBuffer(gl.COLOR_ATTACHMENT1);
+    gl.readPixels(0, 0, cols, rows, gl.RGBA, gl.UNSIGNED_BYTE, runner.colorReadbackBuf);
+    gl.readBuffer(gl.COLOR_ATTACHMENT0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     const out = this.workerFieldBuf;
+    const rgbOut = runner.colorOutBuf;
+    let hasCustomRgb = false;
     for (let i = 0; i < cellCount; i += 1) {
       const b = i * 4;
       out[b] = (runner.readbackBuf[b] ?? 0) / 255;
       out[b + 1] = (((runner.readbackBuf[b + 1] ?? 128) - 128) / 127) * Math.PI;
       out[b + 2] = (runner.readbackBuf[b + 2] ?? 0) / 255;
       out[b + 3] = (runner.readbackBuf[b + 3] ?? 255) / 255;
+
+      const cA = runner.colorReadbackBuf[b + 3] ?? 0;
+      if (cA >= 128) {
+        hasCustomRgb = true;
+        rgbOut[b] = runner.colorReadbackBuf[b] ?? 0;
+        rgbOut[b + 1] = runner.colorReadbackBuf[b + 1] ?? 0;
+        rgbOut[b + 2] = runner.colorReadbackBuf[b + 2] ?? 0;
+        rgbOut[b + 3] = 255;
+      } else {
+        rgbOut[b] = 0;
+        rgbOut[b + 1] = 0;
+        rgbOut[b + 2] = 0;
+        rgbOut[b + 3] = 0;
+      }
     }
 
     return {
       cols,
       rows,
       field: out.subarray(0, cellCount * 4),
+      rgb: hasCustomRgb ? rgbOut.subarray(0, cellCount * 4) : undefined,
     };
   }
 
@@ -997,10 +1208,13 @@ export class AsciiEngine {
     const fragSrc = `${GLSL_PRELUDE}
 ${plugin.fragmentBody}
 void main() {
+  _cellRgbOverride = vec4(0.0);
   vec2 cellCoord = floor(v_uv * u_gridDims);
   vec4 cell = evaluateCell(cellCoord, u_gridDims, u_time);
+  float gradedLum = applyGlobalGrading(cell.r);
   float encodedAngle = clamp(cell.g / 6.2831853, -0.5, 0.5) * (254.0 / 255.0) + (128.0 / 255.0);
-  outCellField = vec4(clamp(cell.r, 0.0, 1.0), encodedAngle, clamp(cell.b, 0.0, 1.0), clamp(cell.a, 0.0, 1.0));
+  outCellField = vec4(gradedLum, encodedAngle, clamp(cell.b, 0.0, 1.0), clamp(cell.a, 0.0, 1.0));
+  outCellColor = _cellRgbOverride;
 }
 `;
 
@@ -1036,8 +1250,10 @@ void main() {
     const fboB = gl.createFramebuffer();
     const texA = gl.createTexture();
     const texB = gl.createTexture();
+    const texColorA = gl.createTexture();
+    const texColorB = gl.createTexture();
 
-    if (!vao || !vbo || !ubo || !fboA || !fboB || !texA || !texB) return;
+    if (!vao || !vbo || !ubo || !fboA || !fboB || !texA || !texB || !texColorA || !texColorB) return;
 
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
@@ -1046,7 +1262,7 @@ void main() {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
-    const uboData = new ArrayBuffer(80);
+    const uboData = new ArrayBuffer(96);
     gl.bindBuffer(gl.UNIFORM_BUFFER, ubo);
     gl.bufferData(gl.UNIFORM_BUFFER, uboData, gl.DYNAMIC_DRAW);
 
@@ -1057,12 +1273,17 @@ void main() {
       ubo,
       fboA,
       texA,
+      texColorA,
       fboB,
       texB,
+      texColorB,
       pingIndex: 0,
+      hasRenderedPass: false,
       cols: 0,
       rows: 0,
       readbackBuf: new Uint8Array(0),
+      colorReadbackBuf: new Uint8Array(0),
+      colorOutBuf: new Uint8ClampedArray(0),
       uboData,
       uboF32: new Float32Array(uboData),
       uboU32: new Uint32Array(uboData),
@@ -1083,21 +1304,24 @@ void main() {
     runner.cols = cols;
     runner.rows = rows;
 
-    const pairs: readonly [WebGLFramebuffer, WebGLTexture][] = [
-      [runner.fboA, runner.texA],
-      [runner.fboB, runner.texB],
+    const pairs: readonly [WebGLFramebuffer, WebGLTexture, WebGLTexture][] = [
+      [runner.fboA, runner.texA, runner.texColorA],
+      [runner.fboB, runner.texB, runner.texColorB],
     ];
 
-    for (const [fbo, tex] of pairs) {
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, cols, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    for (const [fbo, texField, texColor] of pairs) {
+      for (const tex of [texField, texColor]) {
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, cols, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      }
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texField, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, texColor, 0);
     }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1166,6 +1390,122 @@ void main() {
     gl.deleteFramebuffer(runner.fboB);
     gl.deleteTexture(runner.texA);
     gl.deleteTexture(runner.texB);
+    gl.deleteTexture(runner.texColorA);
+    gl.deleteTexture(runner.texColorB);
+  }
+
+  private applyGlobalGradingToRgba(src: Uint8ClampedArray): Uint8ClampedArray {
+    const { brightness, contrast, gamma, autoLevels, autoLevelsLowPct, autoLevelsHighPct } =
+      this.grading;
+    const hasGrade =
+      Math.abs(brightness) > 1e-4 ||
+      Math.abs(contrast) > 1e-4 ||
+      Math.abs(gamma - 1) > 1e-4 ||
+      autoLevels;
+    if (!hasGrade) return src;
+
+    if (this.gradedRgbaScratch.length < src.length) {
+      this.gradedRgbaScratch = new Uint8ClampedArray(src.length);
+    }
+    const dst = this.gradedRgbaScratch.subarray(0, src.length);
+
+    const c = Math.max(-0.99, Math.min(1, contrast)) * 255;
+    const contrastFactor = (259 * (c + 255)) / (255 * (259 - c));
+    const bOffset = brightness * 255;
+    const invGamma = 1 / Math.max(0.05, gamma);
+    const applyGamma = Math.abs(invGamma - 1) > 1e-4;
+    const pixelCount = src.length >> 2;
+    const hist = autoLevels ? new Uint32Array(256) : null;
+
+    for (let i = 0; i < pixelCount; i += 1) {
+      const p4 = i * 4;
+      let r = ((src[p4] ?? 0) - 128) * contrastFactor + 128 + bOffset;
+      let g = ((src[p4 + 1] ?? 0) - 128) * contrastFactor + 128 + bOffset;
+      let b = ((src[p4 + 2] ?? 0) - 128) * contrastFactor + 128 + bOffset;
+
+      r = r < 0 ? 0 : r > 255 ? 255 : r;
+      g = g < 0 ? 0 : g > 255 ? 255 : g;
+      b = b < 0 ? 0 : b > 255 ? 255 : b;
+
+      if (applyGamma) {
+        r = Math.pow(r / 255, invGamma) * 255;
+        g = Math.pow(g / 255, invGamma) * 255;
+        b = Math.pow(b / 255, invGamma) * 255;
+      }
+
+      const rByte = r < 0 ? 0 : r > 255 ? 255 : Math.round(r);
+      const gByte = g < 0 ? 0 : g > 255 ? 255 : Math.round(g);
+      const bByte = b < 0 ? 0 : b > 255 ? 255 : Math.round(b);
+
+      dst[p4] = rByte;
+      dst[p4 + 1] = gByte;
+      dst[p4 + 2] = bByte;
+      dst[p4 + 3] = src[p4 + 3] ?? 255;
+
+      if (hist) {
+        const yBin = Math.min(255, Math.max(0, Math.round(0.2126 * rByte + 0.7152 * gByte + 0.0722 * bByte)));
+        hist[yBin] = (hist[yBin] ?? 0) + 1;
+      }
+    }
+
+    if (hist && pixelCount > 0) {
+      const findQuantile = (pct: number): number => {
+        const target = pixelCount * Math.max(0, Math.min(1, pct));
+        let acc = 0;
+        for (let i = 0; i < 256; i += 1) {
+          acc += hist[i] ?? 0;
+          if (acc >= target) return i;
+        }
+        return 255;
+      };
+      const lo = findQuantile(autoLevelsLowPct);
+      const hi = findQuantile(autoLevelsHighPct);
+      const span = hi - lo;
+      if (span >= 1) {
+        const scale = 255 / span;
+        for (let i = 0; i < pixelCount; i += 1) {
+          const p4 = i * 4;
+          dst[p4] = Math.min(255, Math.max(0, Math.round(((dst[p4] ?? 0) - lo) * scale)));
+          dst[p4 + 1] = Math.min(255, Math.max(0, Math.round(((dst[p4 + 1] ?? 0) - lo) * scale)));
+          dst[p4 + 2] = Math.min(255, Math.max(0, Math.round(((dst[p4 + 2] ?? 0) - lo) * scale)));
+        }
+      }
+    }
+
+    return dst;
+  }
+
+  private applyGlobalGradingToField(src: Float32Array, cellCount: number): Float32Array {
+    const { brightness, contrast, gamma } = this.grading;
+    const hasGrade =
+      Math.abs(brightness) > 1e-4 ||
+      Math.abs(contrast) > 1e-4 ||
+      Math.abs(gamma - 1) > 1e-4;
+    if (!hasGrade) return src;
+
+    const needed = cellCount * 4;
+    if (this.gradedWorkerFieldBuf.length < needed) {
+      this.gradedWorkerFieldBuf = new Float32Array(needed);
+    }
+    const dst = this.gradedWorkerFieldBuf.subarray(0, needed);
+    dst.set(src.subarray(0, needed));
+
+    const c = Math.max(-0.99, Math.min(1, contrast)) * 255;
+    const contrastFactor = (259 * (c + 255)) / (255 * (259 - c));
+    const invGamma = 1 / Math.max(0.05, gamma);
+    const applyGamma = Math.abs(invGamma - 1) > 1e-4;
+
+    for (let i = 0; i < cellCount; i += 1) {
+      const base = i * 4;
+      let y = ((dst[base] ?? 0) - 0.5) * contrastFactor + 0.5 + brightness;
+      y = y < 0 ? 0 : y > 1 ? 1 : y;
+      if (applyGamma) {
+        y = Math.pow(y, invGamma);
+      }
+      dst[base] = y < 0 ? 0 : y > 1 ? 1 : y;
+    }
+
+    return dst;
   }
 
   private computeGridDims(): { cols: number; rows: number } {
@@ -1223,11 +1563,13 @@ void main() {
       sourceKind: this.sourceKind,
       activeStyleId,
       activeGenerativeId: this.activePlugin?.id ?? null,
-      backendTier: this.renderer.isContextLost() ? 'canvas2d-fallback' : 'webgl2-instanced',
+      backendTier: this.renderer.isUsingFallback2d() || this.renderer.isContextLost()
+        ? 'canvas2d-fallback'
+        : 'webgl2-instanced',
       isPlaying: this.isPlaying,
       isWebcamActive: this.media.isWebcamActive(),
       hasMediaInput: this.media.hasInput(),
-      isContextLost: this.renderer.isContextLost(),
+      isContextLost: !this.renderer.canRender(),
       fps: this.currentFps,
       cols,
       rows,

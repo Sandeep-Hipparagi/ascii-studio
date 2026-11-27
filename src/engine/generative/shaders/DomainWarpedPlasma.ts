@@ -92,8 +92,8 @@ vec4 evaluateCell(vec2 cellCoord, vec2 gridDims, float time) {
   float f = evalWarp(p, t, q, r);
 
   float luminance = clamp(0.5 + 0.5 * f, 0.0, 1.0);
-  // Contrast-enhance midtones slightly for crisp ASCII banding
-  luminance = smoothstep(0.12, 0.88, luminance);
+  // Open shadows into clean negative space and enhance fluid ridges
+  luminance = smoothstep(0.18, 0.88, luminance);
 
   float angle = atan(r.y, r.x);
   float palScalar = fract(luminance * 0.65 + length(q) * 0.35 + time * u_paletteSpeed);
@@ -104,9 +104,9 @@ vec4 evaluateCell(vec2 cellCoord, vec2 gridDims, float time) {
     vec3(1.0, 1.0, 1.0),
     vec3(0.26, 0.42, 0.56)
   );
-  float paletteIdx = luminance709(palCol);
+  emitCellRgb(palCol * (0.4 + 0.6 * luminance));
 
-  return vec4(luminance, angle, paletteIdx, 1.0);
+  return vec4(luminance, angle, palScalar, 1.0);
 }
 `,
 };

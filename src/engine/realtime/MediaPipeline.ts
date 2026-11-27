@@ -210,6 +210,7 @@ export class MediaPipeline {
   private staticDirty = false;
 
   private readonly staging: { canvas: StagingCanvas; ctx: StagingCtx };
+  private readonly backdropStaging: { canvas: StagingCanvas; ctx: StagingCtx };
   private fieldBuffer = new Float32Array(0);
   private lumaGridBuffer = new Float32Array(0);
   private edgeMagBuffer = new Float32Array(0);
@@ -219,6 +220,7 @@ export class MediaPipeline {
 
   public constructor() {
     this.staging = createStagingSurface(64, 64);
+    this.backdropStaging = createStagingSurface(96, 72);
   }
 
   public setInput(input: MediaInput | null): void {
@@ -328,6 +330,35 @@ export class MediaPipeline {
 
   public markDirty(): void {
     this.staticDirty = true;
+  }
+
+  /**
+   * Renders the fitted active media source into a low-resolution (96x72) offscreen
+   * canvas whose GPU `LINEAR` texture sampling yields a blurred ambient backdrop.
+   */
+  public getBlurredBackdropSurface(
+    viewportW: number,
+    viewportH: number,
+    fitMode: MediaFitMode
+  ): StagingCanvas | null {
+    if (!this.source) return null;
+    const v = this.activeVideoEl;
+    if (v && v.readyState < 2) return null;
+
+    const drawable = this.resolveDrawable();
+    if (!drawable) return null;
+
+    const { srcW, srcH } = this.getDrawableDimensions(drawable);
+    if (srcW <= 0 || srcH <= 0) return null;
+
+    const bw = 96;
+    const bh = 72;
+    const ctx = this.backdropStaging.ctx;
+    ctx.clearRect(0, 0, bw, bh);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'low';
+    this.drawFittedSource(ctx, drawable, srcW, srcH, viewportW, viewportH, bw, bh, fitMode);
+    return this.backdropStaging.canvas;
   }
 
   /**

@@ -84,7 +84,7 @@ export class GrayScottSimulation implements WorkerGridSimulation {
     this.vCurr.fill(0.0);
 
     const rng = mulberry32(this.seed);
-    const dropCount = Math.max(3, Math.min(12, Math.floor((this.cols * this.rows) / 250)));
+    const dropCount = Math.max(6, Math.min(18, Math.floor((this.cols * this.rows) / 160)));
 
     // Always seed center + deterministic PRNG droplets
     this.injectDrop(this.cols * 0.5, this.rows * 0.5, Math.max(2, Math.min(this.cols, this.rows) * 0.08));
@@ -94,6 +94,15 @@ export class GrayScottSimulation implements WorkerGridSimulation {
       const r = 1.5 + rng() * 2.5;
       this.injectDrop(cx, cy, r);
     }
+
+    // Run 80 warm-up iterations so Turing patterns bloom immediately on frame 1
+    this.advanceIterations(
+      80,
+      GRAY_SCOTT_PRESETS.coral.feed,
+      GRAY_SCOTT_PRESETS.coral.kill,
+      0.2,
+      0.1
+    );
   }
 
   /**
@@ -147,11 +156,21 @@ export class GrayScottSimulation implements WorkerGridSimulation {
         ? Math.max(1, Math.min(24, Math.round(params['stepsPerFrame'])))
         : 8;
 
+    this.advanceIterations(stepsPerFrame, feed, kill, du, dv);
+  }
+
+  private advanceIterations(
+    iterationCount: number,
+    feed: number,
+    kill: number,
+    du: number,
+    dv: number
+  ): void {
     const subDt = 1.0;
     const w = this.cols;
     const h = this.rows;
 
-    for (let s = 0; s < stepsPerFrame; s += 1) {
+    for (let s = 0; s < iterationCount; s += 1) {
       const uIn = this.uCurr;
       const vIn = this.vCurr;
       const uOut = this.uNext;

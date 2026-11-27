@@ -76,18 +76,88 @@ export interface LinearGradeOptions {
 }
 
 /**
- * Computes linearized Rec. 709 luminance over an RGBA8 pixel buffer with
- * contrast/brightness/gamma grading and optional percentile auto-levels.
+ * Pre-allocated reusable buffer pool keyed by `(cols, rows, sampleCount)` so
+ * 60 FPS real-time style plugins trigger zero per-frame typed-array allocations.
  */
-export function extractGradedLuminanceField(
+export class RealtimeBufferPool {
+  private fieldCap = 0;
+  private sampleCap = 0;
+  private cellCap = 0;
+
+  private fieldBuf = new Float32Array(0);
+  private lumaBuf = new Float32Array(0);
+  private gradedRgbBuf = new Uint8ClampedArray(0);
+  private cellRgbBuf = new Uint8ClampedArray(0);
+  private edgeStrengthBuf = new Float32Array(0);
+  private brailleMasksBuf = new Uint8Array(0);
+  private glyphsBuf: string[] = [];
+  public readonly hist = new Uint32Array(256);
+
+  private cachedRamp = '';
+  private cachedRampChars: string[] = [];
+
+  public getRampChars(ramp: string): readonly string[] {
+    if (ramp !== this.cachedRamp) {
+      this.cachedRamp = ramp;
+      this.cachedRampChars = Array.from(ramp);
+    }
+    return this.cachedRampChars;
+  }
+
+  public acquire(cols: number, rows: number, sampleCount = cols * rows): {
+    readonly field: Float32Array;
+    readonly luma: Float32Array;
+    readonly gradedRgb: Uint8ClampedArray;
+    readonly cellRgb: Uint8ClampedArray;
+    readonly edgeStrength: Float32Array;
+    readonly brailleMasks: Uint8Array;
+    readonly glyphs: string[];
+  } {
+    const cellCount = Math.max(1, cols * rows);
+    const sCount = Math.max(1, sampleCount);
+
+    if (cellCount > this.cellCap) {
+      this.cellCap = cellCount;
+      this.cellRgbBuf = new Uint8ClampedArray(cellCount * 4);
+      this.edgeStrengthBuf = new Float32Array(cellCount);
+      this.brailleMasksBuf = new Uint8Array(cellCount);
+    }
+    if (cellCount * 4 > this.fieldCap) {
+      this.fieldCap = cellCount * 4;
+      this.fieldBuf = new Float32Array(this.fieldCap);
+    }
+    if (sCount > this.sampleCap) {
+      this.sampleCap = sCount;
+      this.lumaBuf = new Float32Array(sCount);
+      this.gradedRgbBuf = new Uint8ClampedArray(sCount * 4);
+    }
+    if (this.glyphsBuf.length !== cellCount) {
+      this.glyphsBuf.length = cellCount;
+    }
+
+    return {
+      field: this.fieldBuf.subarray(0, cellCount * 4),
+      luma: this.lumaBuf.subarray(0, sCount),
+      gradedRgb: this.gradedRgbBuf.subarray(0, sCount * 4),
+      cellRgb: this.cellRgbBuf.subarray(0, cellCount * 4),
+      edgeStrength: this.edgeStrengthBuf.subarray(0, cellCount),
+      brailleMasks: this.brailleMasksBuf.subarray(0, cellCount),
+      glyphs: this.glyphsBuf,
+    };
+  }
+}
+
+export function extractGradedLuminanceFieldInto(
   rgba: Uint8ClampedArray,
   pixelCount: number,
-  options: LinearGradeOptions
+  options: LinearGradeOptions,
+  outLuma: Float32Array,
+  scratchHist?: Uint32Array
 ): Float32Array {
-  const luma = new Float32Array(pixelCount);
   const contrastFactor = computeContrastFactor(options.contrast);
   const invGamma = 1 / Math.max(0.05, options.gamma);
-  const hist = options.autoLevels ? new Uint32Array(256) : null;
+  const hist = options.autoLevels ? (scratchHist ?? new Uint32Array(256)) : null;
+  if (hist) hist.fill(0);
 
   for (let i = 0; i < pixelCount; i += 1) {
     const p4 = i * 4;
@@ -101,7 +171,7 @@ export function extractGradedLuminanceField(
       y = Math.pow(y, invGamma);
     }
 
-    luma[i] = y;
+    outLuma[i] = y;
     if (hist) {
       const bin = Math.min(255, Math.max(0, (y * 255) | 0));
       hist[bin] = (hist[bin] ?? 0) + 1;
@@ -121,27 +191,44 @@ export function extractGradedLuminanceField(
 
   const invSpan = 1 / Math.max(1e-4, qHi - qLo);
   for (let i = 0; i < pixelCount; i += 1) {
-    let y = luma[i] ?? 0;
+    let y = outLuma[i] ?? 0;
     if (hist) {
       y = clamp01((y - qLo) * invSpan);
     }
     if (options.invert) {
       y = 1 - y;
     }
-    luma[i] = y;
+    outLuma[i] = y;
   }
 
-  return luma;
+  return outLuma;
 }
 
-export function gradeSourceRgba(
+/**
+ * Computes linearized Rec. 709 luminance over an RGBA8 pixel buffer with
+ * contrast/brightness/gamma grading and optional percentile auto-levels.
+ */
+export function extractGradedLuminanceField(
+  rgba: Uint8ClampedArray,
+  pixelCount: number,
+  options: LinearGradeOptions
+): Float32Array {
+  return extractGradedLuminanceFieldInto(
+    rgba,
+    pixelCount,
+    options,
+    new Float32Array(pixelCount)
+  );
+}
+
+export function gradeSourceRgbaInto(
   rgba: Uint8ClampedArray,
   pixelCount: number,
   brightness: number,
   contrast: number,
-  invert: boolean
+  invert: boolean,
+  out: Uint8ClampedArray
 ): Uint8ClampedArray {
-  const out = new Uint8ClampedArray(pixelCount * 4);
   const contrastFactor = computeContrastFactor(contrast);
   const bOff = brightness * 255;
 
@@ -162,6 +249,23 @@ export function gradeSourceRgba(
   }
 
   return out;
+}
+
+export function gradeSourceRgba(
+  rgba: Uint8ClampedArray,
+  pixelCount: number,
+  brightness: number,
+  contrast: number,
+  invert: boolean
+): Uint8ClampedArray {
+  return gradeSourceRgbaInto(
+    rgba,
+    pixelCount,
+    brightness,
+    contrast,
+    invert,
+    new Uint8ClampedArray(pixelCount * 4)
+  );
 }
 
 function percentileBin(hist: Uint32Array, total: number, pct: number): number {

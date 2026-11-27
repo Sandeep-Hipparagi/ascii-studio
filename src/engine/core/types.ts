@@ -50,6 +50,7 @@ export interface PostFxUniforms {
   readonly crtScanlineDensity: number;
   readonly bloomIntensity: number;
   readonly bloomThreshold: number;
+  readonly backdropOpacity?: number;
 }
 
 export interface MediaGradingParams {

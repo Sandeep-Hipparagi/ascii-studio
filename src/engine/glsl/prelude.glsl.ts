@@ -17,13 +17,21 @@ layout(std140) uniform StudioFrame {
   uint  u_frameIndex;
   vec4  u_audioBands;
   vec4  u_pointer;
+  vec4  u_grading; // (brightness, contrast, gamma, reserved)
 };
 
 uniform sampler2D u_prevField;
 uniform sampler2D u_spectrumTex;
 
 in vec2 v_uv;
-out vec4 outCellField;
+layout(location = 0) out vec4 outCellField;
+layout(location = 1) out vec4 outCellColor;
+
+vec4 _cellRgbOverride = vec4(0.0);
+
+void emitCellRgb(vec3 rgb) {
+  _cellRgbOverride = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+}
 
 // --- Modular Arithmetic Helpers ---
 vec2 _mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -204,5 +212,13 @@ float srgbToLinear(float u) {
 float luminance709(vec3 srgb) {
   vec3 lin = vec3(srgbToLinear(srgb.r), srgbToLinear(srgb.g), srgbToLinear(srgb.b));
   return dot(lin, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float applyGlobalGrading(float lum) {
+  float y = clamp(lum, 0.0, 1.0);
+  float c = clamp(u_grading.y, -0.99, 1.0) * 255.0;
+  float contrastFactor = (259.0 * (c + 255.0)) / (255.0 * (259.0 - c));
+  y = clamp((y - 0.5) * contrastFactor + 0.5 + u_grading.x, 0.0, 1.0);
+  return clamp(pow(y, 1.0 / max(u_grading.z, 0.05)), 0.0, 1.0);
 }
 `;

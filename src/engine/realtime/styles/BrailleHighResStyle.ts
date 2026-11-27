@@ -8,12 +8,15 @@
 import type { RealtimeStylePlugin } from '../../../registry/types';
 import {
   BAYER_MATRIX_4,
+  RealtimeBufferPool,
   clamp01,
-  extractGradedLuminanceField,
-  gradeSourceRgba,
+  extractGradedLuminanceFieldInto,
+  gradeSourceRgbaInto,
   readBooleanParam,
   readNumberParam,
 } from './shared';
+
+const braillePool = new RealtimeBufferPool();
 
 // Unicode Braille dot bits: col 0 (rows 0..3) -> bits 0,1,2,6; col 1 -> bits 3,4,5,7
 const BRAILLE_BIT_TABLE = new Uint8Array([
@@ -101,18 +104,21 @@ export const BrailleHighResStyle: RealtimeStylePlugin = {
     const contrast = readNumberParam(params, 'contrast', 0.1);
     const invert = readBooleanParam(params, 'invert', false);
 
-    const luma = extractGradedLuminanceField(rgba, sampleCount, {
-      brightness: 0,
-      contrast,
-      gamma: 1.0,
-      invert,
-    });
-    const gradedSrcRgb = gradeSourceRgba(rgba, sampleCount, 0, contrast, invert);
+    const { luma, gradedRgb: gradedSrcRgb, field, cellRgb, brailleMasks, glyphs } =
+      braillePool.acquire(cols, rows, sampleCount);
 
-    const field = new Float32Array(cellCount * 4);
-    const cellRgb = new Uint8ClampedArray(cellCount * 4);
-    const brailleMasks = new Uint8Array(cellCount);
-    const glyphs: string[] = new Array(cellCount);
+    extractGradedLuminanceFieldInto(
+      rgba,
+      sampleCount,
+      {
+        brightness: 0,
+        contrast,
+        gamma: 1.0,
+        invert,
+      },
+      luma
+    );
+    gradeSourceRgbaInto(rgba, sampleCount, 0, contrast, invert, gradedSrcRgb);
 
     for (let r = 0; r < rows; r += 1) {
       for (let c = 0; c < cols; c += 1) {

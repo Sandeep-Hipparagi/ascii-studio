@@ -178,6 +178,7 @@ export function StudioViewport({
           type="button"
           onClick={handleWebcamClick}
           title="Toggle Webcam"
+          aria-label={snapshot.isWebcamActive ? 'Disable webcam' : 'Enable webcam'}
           className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 font-medium transition ${
             snapshot.isWebcamActive
               ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
@@ -213,6 +214,7 @@ export function StudioViewport({
           type="button"
           onClick={() => fileInputRef.current?.click()}
           title="Upload Image or Video"
+          aria-label="Upload image or video"
           className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 font-medium text-zinc-300 hover:bg-zinc-800 transition"
         >
           <Upload className="h-3.5 w-3.5" />
@@ -223,6 +225,9 @@ export function StudioViewport({
           <button
             type="button"
             onClick={() => setSamplesOpen((o) => !o)}
+            title="Choose Sample Preset"
+            aria-label="Choose sample preset"
+            aria-expanded={samplesOpen}
             className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 font-medium text-zinc-300 hover:bg-zinc-800 transition"
           >
             <ImageIcon className="h-3.5 w-3.5" />
@@ -232,7 +237,7 @@ export function StudioViewport({
             <div className="absolute bottom-11 left-0 w-40 rounded-lg border border-zinc-800 bg-zinc-900 p-1 shadow-xl">
               {(
                 [
-                  { id: 'calibration', label: 'Calibration Sphere' },
+                  { id: 'calibration', label: 'Nebula Sculpture' },
                   { id: 'rings', label: 'Harmonic Rings' },
                   { id: 'prism', label: 'Prism Gradient' },
                 ] as const
@@ -269,6 +274,7 @@ export function StudioViewport({
           type="button"
           onClick={onOpenExport}
           title="Export ASCII (Cmd/Ctrl+E)"
+          aria-label="Export ASCII artwork"
           className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500 px-3.5 py-1.5 font-semibold text-zinc-950 hover:bg-emerald-400 transition"
         >
           <Download className="h-3.5 w-3.5" />

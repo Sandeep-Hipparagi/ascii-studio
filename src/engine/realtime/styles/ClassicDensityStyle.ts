@@ -7,13 +7,16 @@
 import type { RealtimeStylePlugin } from '../../../registry/types';
 import {
   REALTIME_RAMP_PRESETS,
-  extractGradedLuminanceField,
-  gradeSourceRgba,
+  RealtimeBufferPool,
+  extractGradedLuminanceFieldInto,
+  gradeSourceRgbaInto,
   readBooleanParam,
   readNumberParam,
   readStringParam,
   type RealtimeRampKey,
 } from './shared';
+
+const classicPool = new RealtimeBufferPool();
 
 export const ClassicDensityStyle: RealtimeStylePlugin = {
   mode: 'realtime',
@@ -48,29 +51,7 @@ export const ClassicDensityStyle: RealtimeStylePlugin = {
       min: -0.9,
       max: 0.9,
       step: 0.02,
-      default: 0.15,
-    },
-    {
-      id: 'brightness',
-      uniformName: 'u_brightness',
-      label: 'Brightness',
-      kind: 'slider',
-      group: 'grading',
-      min: -0.5,
-      max: 0.5,
-      step: 0.02,
-      default: 0,
-    },
-    {
-      id: 'gamma',
-      uniformName: 'u_gamma',
-      label: 'Gamma',
-      kind: 'slider',
-      group: 'grading',
-      min: 0.3,
-      max: 2.5,
-      step: 0.05,
-      default: 1.0,
+      default: 0.16,
     },
     {
       id: 'autoLevels',
@@ -94,27 +75,29 @@ export const ClassicDensityStyle: RealtimeStylePlugin = {
     const cellCount = cols * rows;
     const rampKey = readStringParam(params, 'rampPreset', 'standard') as RealtimeRampKey;
     const resolvedRamp = REALTIME_RAMP_PRESETS[rampKey] ?? REALTIME_RAMP_PRESETS.standard;
-    const rampChars = Array.from(resolvedRamp);
+    const rampChars = classicPool.getRampChars(resolvedRamp);
 
-    const brightness = readNumberParam(params, 'brightness', 0);
-    const contrast = readNumberParam(params, 'contrast', 0.15);
-    const gamma = readNumberParam(params, 'gamma', 1.0);
+    const contrast = readNumberParam(params, 'contrast', 0.16);
     const autoLevels = readBooleanParam(params, 'autoLevels', false);
     const invert = readBooleanParam(params, 'invert', false);
 
-    const luma = extractGradedLuminanceField(rgba, cellCount, {
-      brightness,
-      contrast,
-      gamma,
-      invert,
-      autoLevels,
-      lowPct: 0.02,
-      highPct: 0.98,
-    });
-
-    const gradedRgb = gradeSourceRgba(rgba, cellCount, brightness, contrast, invert);
-    const field = new Float32Array(cellCount * 4);
-    const glyphs: string[] = new Array(cellCount);
+    const { luma, gradedRgb, field, glyphs } = classicPool.acquire(cols, rows, cellCount);
+    extractGradedLuminanceFieldInto(
+      rgba,
+      cellCount,
+      {
+        brightness: 0,
+        contrast,
+        gamma: 1.0,
+        invert,
+        autoLevels,
+        lowPct: 0.02,
+        highPct: 0.98,
+      },
+      luma,
+      classicPool.hist
+    );
+    gradeSourceRgbaInto(rgba, cellCount, 0, contrast, invert, gradedRgb);
 
     for (let i = 0; i < cellCount; i += 1) {
       const y = luma[i] ?? 0;

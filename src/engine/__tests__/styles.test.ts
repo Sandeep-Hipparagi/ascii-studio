@@ -7,6 +7,7 @@ import {
   styleRegistry,
 } from '../../registry';
 import { ReactionDiffusionStyle } from '../generative/ReactionDiffusionStyle';
+import { BayerDitherStyle } from '../realtime/styles/BayerDitherStyle';
 import { BrailleHighResStyle } from '../realtime/styles/BrailleHighResStyle';
 import { SobelEdgeStyle } from '../realtime/styles/SobelEdgeStyle';
 
@@ -209,5 +210,43 @@ describe('ReactionDiffusionStyle Gray-Scott Simulation', () => {
     const outAfterDrop = new Float32Array(cols * rows * 4);
     simA.writeCellField(outAfterDrop);
     expect(Number.isFinite(outAfterDrop[4 * cols * 4 + 4 * 4])).toBe(true);
+  });
+
+  it('produces active warmed-up Turing patterns immediately on creation', () => {
+    const cols = 48;
+    const rows = 32;
+    const sim = ReactionDiffusionStyle.createSimulation(cols, rows, 1337);
+    const initialOut = new Float32Array(cols * rows * 4);
+    sim.writeCellField(initialOut);
+
+    let activeCells = 0;
+    for (let i = 0; i < cols * rows; i += 1) {
+      if ((initialOut[i * 4] ?? 0) > 0.15) activeCells += 1;
+    }
+    expect(activeCells).toBeGreaterThan(20);
+  });
+});
+
+describe('BayerDitherStyle Shadow Cutoff Gate', () => {
+  it('keeps near-black background pixels empty spaces rather than checker noise', () => {
+    const cols = 8;
+    const rows = 8;
+    const rgba = new Uint8ClampedArray(cols * rows * 4);
+    for (let i = 0; i < cols * rows; i += 1) {
+      const p = i * 4;
+      rgba[p] = 12;
+      rgba[p + 1] = 15;
+      rgba[p + 2] = 22;
+      rgba[p + 3] = 255;
+    }
+
+    const result = BayerDitherStyle.process({
+      cols,
+      rows,
+      rgba,
+      params: getDefaultParams(BayerDitherStyle),
+    });
+
+    expect(result.glyphs?.every((g) => g === ' ')).toBe(true);
   });
 });
