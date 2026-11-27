@@ -1,0 +1,19 @@
+# Dependencies & Build Outputs
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# Local Environment
+.env
+.env*.local
+
+# Clean-Room Firewall: Captured Reference Artifacts & Local Tooling
+analysis_scratchpad/
+/analysis_scratchpad/
+rea/

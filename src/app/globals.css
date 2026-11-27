@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --font-mono-stack: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background-color: #09090b;
+  color: #f4f4f5;
+  overflow: hidden;
+}
