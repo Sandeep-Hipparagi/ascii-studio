@@ -6,6 +6,46 @@
 
 export type SamplePresetId = 'calibration' | 'rings' | 'prism';
 
+export const REALTIME_STYLE_SAMPLE_PATHS: Readonly<Record<string, string>> = {
+  'classic-density': '/samples/golden-lotus.jpg',
+  'sobel-edge': '/samples/luminous-butterfly.jpg',
+  'bayer-dither': '/samples/prism-flower.jpg',
+  'braille-highres': '/samples/cosmic-bloom.jpg',
+};
+
+const styleSampleCache = new Map<string, Promise<HTMLImageElement | null>>();
+
+/**
+ * Asynchronously loads and caches the reference JPG assigned to a Real-Time
+ * style with `crossOrigin = 'anonymous'` so `getImageData()` never taints the canvas.
+ */
+export function loadStyleSampleImage(styleId: string): Promise<HTMLImageElement | null> {
+  if (typeof window === 'undefined') return Promise.resolve(null);
+  const src = REALTIME_STYLE_SAMPLE_PATHS[styleId];
+  if (!src) return Promise.resolve(null);
+
+  const cached = styleSampleCache.get(src);
+  if (cached) return cached;
+
+  const promise = new Promise<HTMLImageElement | null>((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.decoding = 'async';
+    img.onload = () => {
+      if (typeof img.decode === 'function') {
+        void img.decode().catch(() => {}).finally(() => resolve(img));
+      } else {
+        resolve(img);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+
+  styleSampleCache.set(src, promise);
+  return promise;
+}
+
 export function createProceduralSampleCanvas(
   presetId: SamplePresetId,
   width = 640,

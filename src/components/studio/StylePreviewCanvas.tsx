@@ -3,7 +3,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 import { AsciiEngine } from '../../engine/core/AsciiEngine';
-import { createProceduralSampleCanvas } from '../../engine/realtime/samplePresets';
+import {
+  createProceduralSampleCanvas,
+  loadStyleSampleImage,
+} from '../../engine/realtime/samplePresets';
 import { getStyleById } from '../../registry';
 import type { StylePlugin } from '../../registry/types';
 
@@ -18,6 +21,7 @@ interface SharedPreviewHost {
   offscreenCanvas: HTMLCanvasElement;
   sampleCanvas: HTMLCanvasElement;
   loadedPluginId: string | null;
+  loadedMediaSource: HTMLImageElement | HTMLCanvasElement | null;
   fontsReady: Promise<boolean>;
 }
 
@@ -46,6 +50,7 @@ function getSharedPreviewHost(): SharedPreviewHost | null {
     offscreenCanvas,
     sampleCanvas,
     loadedPluginId: null,
+    loadedMediaSource: sampleCanvas,
     fontsReady,
   };
   return previewHost;
@@ -55,7 +60,8 @@ function renderPluginToCanvas(
   plugin: StylePlugin,
   target: HTMLCanvasElement,
   elapsedSec: number,
-  dtSec = 1 / 30
+  dtSec = 1 / 30,
+  mediaInput?: HTMLImageElement | HTMLCanvasElement | null
 ): boolean {
   const host = getSharedPreviewHost();
   if (!host) return false;
@@ -65,10 +71,13 @@ function renderPluginToCanvas(
     target.height = PREVIEW_H;
   }
 
+  const desiredMedia = plugin.mode === 'realtime' ? (mediaInput ?? host.sampleCanvas) : null;
+  if (plugin.mode === 'realtime' && desiredMedia && host.loadedMediaSource !== desiredMedia) {
+    host.engine.setMediaInput(desiredMedia);
+    host.loadedMediaSource = desiredMedia;
+  }
+
   if (host.loadedPluginId !== plugin.id) {
-    if (plugin.mode === 'realtime') {
-      host.engine.setMediaInput(host.sampleCanvas);
-    }
     host.engine.setStylePlugin(plugin);
     host.loadedPluginId = plugin.id;
   }
@@ -89,6 +98,7 @@ interface StaticRenderTask {
   readonly plugin: StylePlugin;
   readonly canvas: HTMLCanvasElement;
   readonly elapsedSec: number;
+  readonly mediaInput?: HTMLImageElement | HTMLCanvasElement | null;
   readonly onDone?: () => void;
 }
 
@@ -106,7 +116,7 @@ function scheduleStaticQueueFlush(): void {
     while (staticQueue.length > 0 && processed < batchSize) {
       const task = staticQueue.shift();
       if (!task) break;
-      renderPluginToCanvas(task.plugin, task.canvas, task.elapsedSec, 1 / 30);
+      renderPluginToCanvas(task.plugin, task.canvas, task.elapsedSec, 1 / 30, task.mediaInput);
       task.onDone?.();
       processed += 1;
     }
@@ -121,6 +131,7 @@ function scheduleStaticQueueFlush(): void {
         previewHost.engine.setStylePlugin(classic);
         previewHost.engine.setPlaying(false);
         previewHost.loadedPluginId = classic.id;
+        previewHost.loadedMediaSource = previewHost.sampleCanvas;
       }
     }
   });
@@ -202,7 +213,7 @@ export function StylePreviewCanvas({ plugin, active }: StylePreviewCanvasProps) 
     return observeVisibility(el, setIsVisible);
   }, []);
 
-  // Draw crisp static source thumbnail once for Real-Time hover wipe comparison
+  // Draw crisp static source thumbnail & Real-Time sample image for hover wipe comparison
   useEffect(() => {
     if (plugin.mode !== 'realtime') return;
     const dest = sourceCanvasRef.current;
@@ -212,11 +223,36 @@ export function StylePreviewCanvas({ plugin, active }: StylePreviewCanvasProps) 
       dest.width = PREVIEW_W;
       dest.height = PREVIEW_H;
     }
-    const ctx = dest.getContext('2d');
-    ctx?.drawImage(host.sampleCanvas, 0, 0, PREVIEW_W, PREVIEW_H);
-  }, [plugin.mode]);
 
-  // Render crisp static frame when card becomes visible (or after web fonts resolve)
+    const drawContainSource = (source: HTMLImageElement | HTMLCanvasElement) => {
+      const ctx = dest.getContext('2d');
+      if (!ctx) return;
+      ctx.fillStyle = '#050507';
+      ctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
+      const srcW = source instanceof HTMLImageElement ? source.naturalWidth : source.width;
+      const srcH = source instanceof HTMLImageElement ? source.naturalHeight : source.height;
+      if (srcW <= 0 || srcH <= 0) return;
+      const scale = Math.min(PREVIEW_W / srcW, PREVIEW_H / srcH);
+      const drawnW = srcW * scale;
+      const drawnH = srcH * scale;
+      ctx.drawImage(source, (PREVIEW_W - drawnW) * 0.5, (PREVIEW_H - drawnH) * 0.5, drawnW, drawnH);
+    };
+
+    drawContainSource(host.sampleCanvas);
+
+    let cancelled = false;
+    void loadStyleSampleImage(plugin.id).then((img) => {
+      if (!cancelled && img) {
+        drawContainSource(img);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [plugin.id, plugin.mode]);
+
+  // Render crisp static frame when card becomes visible (or after web fonts / sample JPG resolve)
   useEffect(() => {
     if (!isVisible) return;
     const canvas = asciiCanvasRef.current;
@@ -224,11 +260,21 @@ export function StylePreviewCanvas({ plugin, active }: StylePreviewCanvasProps) 
     if (!canvas || !host) return;
 
     let cancelled = false;
-    enqueueStaticPreview({ plugin, canvas, elapsedSec: 1.6 });
+    let activeMedia: HTMLImageElement | HTMLCanvasElement = host.sampleCanvas;
+    enqueueStaticPreview({ plugin, canvas, elapsedSec: 1.6, mediaInput: activeMedia });
+
+    if (plugin.mode === 'realtime') {
+      void loadStyleSampleImage(plugin.id).then((img) => {
+        if (!cancelled && img) {
+          activeMedia = img;
+          enqueueStaticPreview({ plugin, canvas, elapsedSec: 1.6, mediaInput: img });
+        }
+      });
+    }
 
     void host.fontsReady.then((rebuilt) => {
       if (!cancelled && rebuilt) {
-        enqueueStaticPreview({ plugin, canvas, elapsedSec: 1.6 });
+        enqueueStaticPreview({ plugin, canvas, elapsedSec: 1.6, mediaInput: activeMedia });
       }
     });
 

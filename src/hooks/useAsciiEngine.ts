@@ -20,7 +20,9 @@ import {
 } from '../engine/audio/AudioAnalyzer';
 import { AsciiEngine } from '../engine/core/AsciiEngine';
 import {
+  REALTIME_STYLE_SAMPLE_PATHS,
   createProceduralSampleCanvas,
+  loadStyleSampleImage,
   type SamplePresetId,
 } from '../engine/realtime/samplePresets';
 import type {
@@ -106,6 +108,8 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<AsciiEngine | null>(null);
   const pendingStyleIdRef = useRef<string | null>(null);
+  const hasCustomMediaRef = useRef(false);
+  const sampleRequestSeqRef = useRef(0);
   const audioAnalyzerRef = useRef<AudioAnalyzer | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
@@ -148,6 +152,23 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
     engine.setMediaInput(createProceduralSampleCanvas('calibration'));
     if (initialPlugin) {
       engine.setStylePlugin(initialPlugin);
+      if (
+        initialPlugin.mode === 'realtime' &&
+        REALTIME_STYLE_SAMPLE_PATHS[initialPlugin.id]
+      ) {
+        const reqSeq = ++sampleRequestSeqRef.current;
+        void loadStyleSampleImage(initialPlugin.id).then((img) => {
+          if (
+            !cancelled &&
+            img &&
+            !hasCustomMediaRef.current &&
+            sampleRequestSeqRef.current === reqSeq &&
+            engineRef.current === engine
+          ) {
+            engine.setMediaInput(img);
+          }
+        });
+      }
     }
 
     const syncSize = (): void => {
@@ -215,6 +236,25 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
       engine.setMediaInput(createProceduralSampleCanvas('calibration'));
     }
     engine.setStylePlugin(plugin);
+
+    if (
+      plugin.mode === 'realtime' &&
+      !hasCustomMediaRef.current &&
+      REALTIME_STYLE_SAMPLE_PATHS[plugin.id]
+    ) {
+      const reqSeq = ++sampleRequestSeqRef.current;
+      void loadStyleSampleImage(plugin.id).then((img) => {
+        if (
+          img &&
+          !hasCustomMediaRef.current &&
+          sampleRequestSeqRef.current === reqSeq &&
+          engineRef.current === engine &&
+          engine.getSnapshot().activeStyleId === plugin.id
+        ) {
+          engine.setMediaInput(img);
+        }
+      });
+    }
   }, []);
 
   const updateUniform = useCallback((id: string, value: UniformValue) => {
@@ -225,6 +265,7 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
     (presetId: SamplePresetId) => {
       const engine = engineRef.current;
       if (!engine) return;
+      hasCustomMediaRef.current = true;
       stopWebcamStream();
       revokeObjectUrl();
       engine.setMediaInput(createProceduralSampleCanvas(presetId));
@@ -237,6 +278,7 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
       const engine = engineRef.current;
       if (!engine) return;
 
+      hasCustomMediaRef.current = true;
       stopWebcamStream();
       revokeObjectUrl();
 
@@ -280,7 +322,25 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
 
     if (webcamStreamRef.current) {
       stopWebcamStream();
-      engine.setMediaInput(createProceduralSampleCanvas('calibration'));
+      hasCustomMediaRef.current = false;
+      const activeId = engine.getSnapshot().activeStyleId ?? 'classic-density';
+      if (REALTIME_STYLE_SAMPLE_PATHS[activeId]) {
+        const reqSeq = ++sampleRequestSeqRef.current;
+        void loadStyleSampleImage(activeId).then((img) => {
+          if (
+            img &&
+            !hasCustomMediaRef.current &&
+            sampleRequestSeqRef.current === reqSeq &&
+            engineRef.current === engine
+          ) {
+            engine.setMediaInput(img);
+          } else if (engineRef.current === engine && !engine.getSnapshot().hasMediaInput) {
+            engine.setMediaInput(createProceduralSampleCanvas('calibration'));
+          }
+        });
+      } else {
+        engine.setMediaInput(createProceduralSampleCanvas('calibration'));
+      }
       return;
     }
 
@@ -292,6 +352,7 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
       audio: false,
     });
+    hasCustomMediaRef.current = true;
     revokeObjectUrl();
     webcamStreamRef.current = stream;
     engine.setMediaInput(stream);
