@@ -1,14 +1,18 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import {
+  ArrowRight,
+  ArrowUpDown,
+  ChevronDown,
+  Monitor,
+  Palette,
+  RotateCcw,
   Sliders,
   Sparkles,
-  Monitor,
-  ArrowUpDown,
-  Palette,
   Tv,
-  RotateCcw,
+  Type,
 } from 'lucide-react';
 
 import type {
@@ -18,11 +22,9 @@ import type {
   PaletteConfig,
   PostFxUniforms,
 } from '../../engine/core/types';
-import {
-  COLOR_PALETTE_PRESETS,
-  listStylesByMode,
-} from '../../registry';
+import { COLOR_PALETTE_PRESETS, listStylesByMode } from '../../registry';
 import type {
+  ControlGroup,
   StyleMode,
   StylePlugin,
   UniformControl,
@@ -43,6 +45,13 @@ export interface StyleControlsPanelProps {
   readonly onSetPostFx: (partial: Partial<PostFxUniforms>) => void;
 }
 
+type AccordionSectionId =
+  | 'style'
+  | 'parameters'
+  | 'typography'
+  | 'color'
+  | 'postfx';
+
 const RAMP_OPTIONS = [
   { id: 'classic', label: 'Standard', value: ' .:-=+*#%@' },
   {
@@ -55,20 +64,49 @@ const RAMP_OPTIONS = [
   { id: 'directional', label: 'Directional', value: ' .-|/\\+*' },
 ] as const;
 
+const CONTROL_GROUP_LABELS: Readonly<Record<ControlGroup, string>> = {
+  shape: 'Shape & Geometry',
+  motion: 'Motion & Timing',
+  color: 'Color Response',
+  simulation: 'Simulation Kinetics',
+  grading: 'Signal Thresholding',
+};
+
 function getPluginBadge(plugin: StylePlugin): { label: string; tone: string } {
   if (plugin.mode === 'realtime') {
     if (plugin.category === 'braille') {
-      return { label: 'CPU Kernel', tone: 'bg-violet-500/15 text-violet-300 border-violet-500/30' };
+      return {
+        label: 'Braille 2×4',
+        tone: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
+      };
     }
     if (plugin.category === 'edge-detection') {
-      return { label: 'CPU Kernel', tone: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' };
+      return {
+        label: 'CPU Kernel',
+        tone: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+      };
     }
-    return { label: 'CPU Kernel', tone: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
+    return {
+      label: 'CPU Kernel',
+      tone: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+    };
   }
   if (plugin.executionMode === 'worker-grid') {
-    return { label: 'Worker', tone: 'bg-amber-500/15 text-amber-300 border-amber-500/30' };
+    return {
+      label: 'WebWorker',
+      tone: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    };
   }
-  return { label: 'WebGL2', tone: 'bg-sky-500/15 text-sky-300 border-sky-500/30' };
+  if (plugin.category === 'audio-spectral' || plugin.supportsAudio) {
+    return {
+      label: 'Audio-FFT',
+      tone: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+    };
+  }
+  return {
+    label: 'WebGL2 Shader',
+    tone: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+  };
 }
 
 export function StyleControlsPanel({
@@ -88,7 +126,13 @@ export function StyleControlsPanel({
     snapshot.sourceKind === 'generative' ? 'generative' : 'realtime'
   );
   const [customRampDraft, setCustomRampDraft] = useState<string>(snapshot.ramp);
-  const [activeDrawer, setActiveDrawer] = useState<'style' | 'typography' | 'postfx'>('style');
+  const [openSections, setOpenSections] = useState<Record<AccordionSectionId, boolean>>({
+    style: true,
+    parameters: true,
+    typography: false,
+    color: false,
+    postfx: false,
+  });
 
   useEffect(() => {
     setCustomRampDraft(snapshot.ramp);
@@ -111,6 +155,33 @@ export function StyleControlsPanel({
       ? snapshot.generativeParams
       : snapshot.realtimeParams;
 
+  const groupedUniforms = useMemo(() => {
+    if (!activePlugin) return [];
+    const groups = new Map<ControlGroup | 'general', UniformControl[]>();
+    for (const control of activePlugin.uniformSchema) {
+      const key = control.group ?? 'general';
+      const list = groups.get(key) ?? [];
+      list.push(control);
+      groups.set(key, list);
+    }
+    return Array.from(groups.entries());
+  }, [activePlugin]);
+
+  const activePalettePresetName = useMemo(() => {
+    const match = COLOR_PALETTE_PRESETS.find(
+      (preset) =>
+        snapshot.palette.colorMode === preset.colorMode &&
+        snapshot.palette.fgRgba[0] === preset.fgRgba[0] &&
+        snapshot.palette.fgRgba[1] === preset.fgRgba[1] &&
+        snapshot.palette.bgRgba[0] === preset.bgRgba[0]
+    );
+    return match?.name ?? snapshot.palette.colorMode;
+  }, [snapshot.palette]);
+
+  const toggleSection = (id: AccordionSectionId) => {
+    setOpenSections((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
   const handleModeSwitch = (mode: StyleMode) => {
     setSelectedMode(mode);
     const list = mode === 'realtime' ? realtimeStyles : generativeStyles;
@@ -121,159 +192,176 @@ export function StyleControlsPanel({
   };
 
   return (
-    <aside className="flex h-full w-full flex-col bg-zinc-950 text-zinc-100 select-none">
-      {/* Top Mode Switcher */}
-      <div className="border-b border-zinc-800/80 p-3">
-        <div
-          role="tablist"
-          aria-label="Rendering mode"
-          className="grid grid-cols-2 gap-1 rounded-lg bg-zinc-900 p-1 border border-zinc-800"
+    <aside
+      aria-label="Studio Inspector"
+      className="flex h-full w-full flex-col bg-[var(--bg-panel)] text-[var(--text-primary)] select-none"
+    >
+      <div className="flex-1 overflow-y-auto divide-y divide-[var(--border-subtle)]">
+        {/* Accordion 1: Style & Preset */}
+        <AccordionSection
+          id="style"
+          title="Style & Preset"
+          summary={activePlugin?.name ?? 'Select style'}
+          icon={<Sparkles className="h-3.5 w-3.5 text-emerald-400" />}
+          isOpen={openSections.style}
+          onToggle={() => toggleSection('style')}
         >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={currentMode === 'realtime'}
-            onClick={() => handleModeSwitch('realtime')}
-            className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
-              currentMode === 'realtime'
-                ? 'bg-zinc-800 text-white shadow-sm'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Monitor className="h-3.5 w-3.5" />
-            Real-Time
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={currentMode === 'generative'}
-            onClick={() => handleModeSwitch('generative')}
-            className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
-              currentMode === 'generative'
-                ? 'bg-zinc-800 text-white shadow-sm'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            Generative
-          </button>
-        </div>
-
-        {/* Style Cards */}
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          {visibleStyles.map((plugin) => {
-            const isActive = snapshot.activeStyleId === plugin.id;
-            const badge = getPluginBadge(plugin);
-            return (
-              <button
-                key={plugin.id}
-                type="button"
-                onClick={() => onSelectStyle(plugin.id)}
-                className={`flex flex-col items-start justify-between gap-1.5 rounded-lg border p-2.5 text-left transition ${
-                  isActive
-                    ? 'border-emerald-500/60 bg-emerald-500/10 text-white'
-                    : 'border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900'
-                }`}
-              >
-                <span className="text-xs font-semibold leading-snug text-left">
-                  {plugin.name}
-                </span>
-                <div className="flex w-full items-center justify-between gap-1.5">
-                  <span className="text-[10px] leading-tight text-zinc-400">
-                    {plugin.category}
-                  </span>
-                  <span
-                    className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium ${badge.tone}`}
-                  >
-                    {badge.label}
-                  </span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Inspector Sub-Tabs */}
-      <div className="flex border-b border-zinc-800/80 px-3 pt-2 gap-1 text-xs">
-        <button
-          type="button"
-          onClick={() => setActiveDrawer('style')}
-          className={`flex items-center gap-1.5 border-b-2 px-2.5 py-2 font-medium transition ${
-            activeDrawer === 'style'
-              ? 'border-emerald-400 text-white'
-              : 'border-transparent text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <Sliders className="h-3.5 w-3.5" />
-          Parameters
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveDrawer('typography')}
-          className={`flex items-center gap-1.5 border-b-2 px-2.5 py-2 font-medium transition ${
-            activeDrawer === 'typography'
-              ? 'border-emerald-400 text-white'
-              : 'border-transparent text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <Palette className="h-3.5 w-3.5" />
-          Type &amp; Color
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveDrawer('postfx')}
-          className={`flex items-center gap-1.5 border-b-2 px-2.5 py-2 font-medium transition ${
-            activeDrawer === 'postfx'
-              ? 'border-emerald-400 text-white'
-              : 'border-transparent text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <Tv className="h-3.5 w-3.5" />
-          CRT / Grading
-        </button>
-      </div>
-
-      {/* Scrollable Inspector Body */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-4">
-        {activeDrawer === 'style' && activePlugin && (
           <div className="space-y-3">
-            <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs font-semibold text-zinc-200">{activePlugin.name}</div>
+            <div className="flex items-center justify-between gap-2">
+              <div
+                role="tablist"
+                aria-label="Rendering mode"
+                className="grid flex-1 grid-cols-2 gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-1"
+              >
                 <button
                   type="button"
-                  onClick={onResetStyle}
-                  aria-label="Reset style parameters to defaults"
-                  title="Restore default parameters and character ramp"
-                  className="inline-flex shrink-0 items-center gap-1 rounded border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-zinc-300 hover:border-emerald-500/50 hover:text-emerald-200 transition"
+                  role="tab"
+                  aria-selected={currentMode === 'realtime'}
+                  onClick={() => handleModeSwitch('realtime')}
+                  className={`flex items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+                    currentMode === 'realtime'
+                      ? 'bg-zinc-800 text-white shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
                 >
-                  <RotateCcw className="h-3 w-3" />
-                  <span>Reset Style</span>
+                  <Monitor className="h-3.5 w-3.5" />
+                  <span>Real-Time</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={currentMode === 'generative'}
+                  onClick={() => handleModeSwitch('generative')}
+                  className={`flex items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+                    currentMode === 'generative'
+                      ? 'bg-zinc-800 text-white shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>Generative</span>
                 </button>
               </div>
-              <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
-                {activePlugin.description}
-              </p>
             </div>
 
-            {activePlugin.uniformSchema.map((control) => (
-              <UniformControlField
-                key={`${activePlugin.id}:${control.id}`}
-                control={control}
-                value={activeParamValues[control.id] ?? control.default}
-                onChange={(val) => onUpdateUniform(control.id, val)}
-              />
-            ))}
+            <div className="grid grid-cols-2 gap-2">
+              {visibleStyles.map((plugin) => {
+                const isActive = snapshot.activeStyleId === plugin.id;
+                const badge = getPluginBadge(plugin);
+                return (
+                  <button
+                    key={plugin.id}
+                    type="button"
+                    onClick={() => onSelectStyle(plugin.id)}
+                    aria-pressed={isActive}
+                    className={`flex flex-col items-start justify-between gap-1.5 rounded-lg border p-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-focus)] ${
+                      isActive
+                        ? 'border-[var(--border-active)] bg-[var(--accent-signal-soft)] text-white'
+                        : 'border-[var(--border-default)] bg-[var(--bg-card)] text-zinc-300 hover:border-zinc-600 hover:bg-[var(--bg-card-hover)]'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold leading-snug">
+                      {plugin.name}
+                    </span>
+                    <div className="flex w-full items-center justify-between gap-1.5">
+                      <span className="truncate font-mono text-[10px] text-zinc-400">
+                        {plugin.category}
+                      </span>
+                      <span
+                        className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] font-medium ${badge.tone}`}
+                      >
+                        {badge.label}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between pt-0.5 text-[11px]">
+              <span className="font-mono text-zinc-500">
+                {visibleStyles.length} presets in mode
+              </span>
+              <Link
+                href="/styles"
+                className="inline-flex items-center gap-1 font-medium text-emerald-300 hover:text-emerald-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-focus)] rounded"
+              >
+                <span>Browse Gallery</span>
+                <ArrowRight className="h-3 w-3" />
+              </Link>
+            </div>
           </div>
+        </AccordionSection>
+
+        {/* Accordion 2: Active Style Parameters */}
+        {activePlugin && (
+          <AccordionSection
+            id="parameters"
+            title="Parameters"
+            summary={`${activePlugin.uniformSchema.length} controls`}
+            icon={<Sliders className="h-3.5 w-3.5 text-sky-400" />}
+            isOpen={openSections.parameters}
+            onToggle={() => toggleSection('parameters')}
+          >
+            <div className="space-y-3.5">
+              <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-zinc-100">
+                    {activePlugin.name}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onResetStyle}
+                    aria-label="Reset style parameters to defaults"
+                    title="Restore default parameters and character ramp"
+                    className="inline-flex shrink-0 items-center gap-1 rounded border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-zinc-300 transition hover:border-emerald-500/50 hover:text-emerald-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-focus)]"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    <span>Reset Style</span>
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+                  {activePlugin.description}
+                </p>
+              </div>
+
+              {groupedUniforms.map(([groupKey, controls]) => (
+                <div key={groupKey} className="space-y-2.5">
+                  {groupedUniforms.length > 1 && groupKey !== 'general' && (
+                    <div className="border-b border-[var(--border-subtle)] pb-1 font-mono text-[10px] uppercase tracking-[0.1em] text-zinc-500">
+                      {CONTROL_GROUP_LABELS[groupKey]}
+                    </div>
+                  )}
+                  <div className="space-y-3">
+                    {controls.map((control) => (
+                      <UniformControlField
+                        key={`${activePlugin.id}:${control.id}`}
+                        control={control}
+                        value={activeParamValues[control.id] ?? control.default}
+                        onChange={(val) => onUpdateUniform(control.id, val)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </AccordionSection>
         )}
 
-        {activeDrawer === 'typography' && (
+        {/* Accordion 3: Typography & Ramp */}
+        <AccordionSection
+          id="typography"
+          title="Typography & Ramp"
+          summary={`${snapshot.fontSize}px · ${snapshot.cols}×${snapshot.rows}`}
+          icon={<Type className="h-3.5 w-3.5 text-zinc-300" />}
+          isOpen={openSections.typography}
+          onToggle={() => toggleSection('typography')}
+        >
           <div className="space-y-4">
-            {/* Font Size / Grid Density */}
+            {/* Cell Size / Grid Resolution */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs">
-                <label htmlFor="studio-font-size" className="text-zinc-300 font-medium">
+                <label htmlFor="studio-font-size" className="font-medium text-zinc-300">
                   Cell Size (Grid: {snapshot.cols}×{snapshot.rows})
                 </label>
                 <span className="font-mono text-zinc-400">{snapshot.fontSize}px</span>
@@ -287,14 +375,14 @@ export function StyleControlsPanel({
                 value={snapshot.fontSize}
                 onDoubleClick={() => onSetFontSize(12)}
                 onChange={(e) => onSetFontSize(parseFloat(e.target.value))}
-                className="w-full accent-emerald-400"
+                className="w-full cursor-pointer accent-emerald-400"
               />
             </div>
 
             {/* Atlas Filtering */}
             <div className="flex items-center justify-between text-xs">
-              <span className="text-zinc-300 font-medium">Atlas Filtering</span>
-              <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
+              <span className="font-medium text-zinc-300">Atlas Filtering</span>
+              <div className="inline-flex rounded-md border border-[var(--border-default)] bg-[var(--bg-card)] p-0.5">
                 {(['linear', 'nearest'] as const).map((mode) => (
                   <button
                     key={mode}
@@ -315,7 +403,7 @@ export function StyleControlsPanel({
             {/* Character Ramp Selector & Density Sort */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-zinc-300 font-medium">Character Ramp</span>
+                <span className="font-medium text-zinc-300">Character Ramp</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -326,7 +414,7 @@ export function StyleControlsPanel({
                   className="inline-flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-emerald-300 hover:border-emerald-500/50"
                 >
                   <ArrowUpDown className="h-3 w-3" />
-                  Sort by Visual Density
+                  <span>Sort Density</span>
                 </button>
               </div>
               <div className="flex flex-wrap gap-1.5">
@@ -349,8 +437,8 @@ export function StyleControlsPanel({
                       }}
                       className={`rounded border px-2 py-1 text-[11px] transition ${
                         isSelected
-                          ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
-                          : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                          ? 'border-[var(--border-active)] bg-[var(--accent-signal-soft)] text-emerald-200'
+                          : 'border-[var(--border-default)] bg-[var(--bg-card)] text-zinc-400 hover:text-zinc-200'
                       }`}
                     >
                       {opt.label}
@@ -368,58 +456,81 @@ export function StyleControlsPanel({
                     onSetRamp(e.target.value, false);
                   }
                 }}
-                className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 font-mono text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+                className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-card)] px-2.5 py-1.5 font-mono text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
                 placeholder=" .:-=+*#%@"
               />
             </div>
+          </div>
+        </AccordionSection>
 
-            {/* Color Palette Presets */}
-            <div className="space-y-2">
-              <span className="block text-xs font-medium text-zinc-300">
-                Color Palette Preset
-              </span>
-              <div className="grid grid-cols-2 gap-1.5">
-                {COLOR_PALETTE_PRESETS.map((preset) => {
-                  const selected =
-                    snapshot.palette.colorMode === preset.colorMode &&
-                    snapshot.palette.fgRgba[0] === preset.fgRgba[0] &&
-                    snapshot.palette.fgRgba[1] === preset.fgRgba[1] &&
-                    snapshot.palette.bgRgba[0] === preset.bgRgba[0];
+        {/* Accordion 4: Color & Palette */}
+        <AccordionSection
+          id="color"
+          title="Color & Palette"
+          summary={activePalettePresetName}
+          icon={<Palette className="h-3.5 w-3.5 text-amber-300" />}
+          isOpen={openSections.color}
+          onToggle={() => toggleSection('color')}
+        >
+          <div className="space-y-2.5">
+            <span className="block text-xs font-medium text-zinc-300">
+              Color Palette Preset
+            </span>
+            <div className="grid grid-cols-2 gap-1.5">
+              {COLOR_PALETTE_PRESETS.map((preset) => {
+                const selected =
+                  snapshot.palette.colorMode === preset.colorMode &&
+                  snapshot.palette.fgRgba[0] === preset.fgRgba[0] &&
+                  snapshot.palette.fgRgba[1] === preset.fgRgba[1] &&
+                  snapshot.palette.bgRgba[0] === preset.bgRgba[0];
 
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      onClick={() =>
-                        onSetPalette({
-                          colorMode: preset.colorMode,
-                          fgRgba: preset.fgRgba,
-                          bgRgba: preset.bgRgba,
-                        })
-                      }
-                      className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-[11px] transition ${
-                        selected
-                          ? 'border-emerald-500/60 bg-emerald-500/10 text-white'
-                          : 'border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-700'
-                      }`}
-                    >
-                      <span
-                        className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/20"
-                        style={{ backgroundColor: preset.accentHex }}
-                      />
-                      <span className="truncate">{preset.name}</span>
-                    </button>
-                  );
-                })}
-              </div>
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() =>
+                      onSetPalette({
+                        colorMode: preset.colorMode,
+                        fgRgba: preset.fgRgba,
+                        bgRgba: preset.bgRgba,
+                      })
+                    }
+                    className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-[11px] transition ${
+                      selected
+                        ? 'border-[var(--border-active)] bg-[var(--accent-signal-soft)] text-white'
+                        : 'border-[var(--border-default)] bg-[var(--bg-card)] text-zinc-300 hover:border-zinc-600'
+                    }`}
+                  >
+                    <span
+                      className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/20"
+                      style={{ backgroundColor: preset.accentHex }}
+                    />
+                    <span className="truncate">{preset.name}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
-        )}
+        </AccordionSection>
 
-        {activeDrawer === 'postfx' && (
+        {/* Accordion 5: CRT & Post-FX */}
+        <AccordionSection
+          id="postfx"
+          title="CRT & Post-FX"
+          summary={
+            snapshot.postFx.crtScanlineIntensity > 0 || snapshot.postFx.bloomIntensity > 0
+              ? 'FX Active'
+              : 'Neutral'
+          }
+          icon={<Tv className="h-3.5 w-3.5 text-violet-300" />}
+          isOpen={openSections.postfx}
+          onToggle={() => toggleSection('postfx')}
+        >
           <div className="space-y-4">
-            <div className="space-y-3 border-b border-zinc-800/80 pb-3">
-              <div className="text-xs font-semibold text-zinc-300">Tone &amp; Grading</div>
+            <div className="space-y-3 border-b border-[var(--border-subtle)] pb-3">
+              <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-zinc-400">
+                Tone &amp; Grading
+              </div>
               <SimpleSlider
                 label="Brightness"
                 value={snapshot.grading.brightness}
@@ -450,7 +561,9 @@ export function StyleControlsPanel({
             </div>
 
             <div className="space-y-3">
-              <div className="text-xs font-semibold text-zinc-300">CRT &amp; Phosphor FX</div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-zinc-400">
+                CRT &amp; Phosphor FX
+              </div>
               <SimpleSlider
                 label="CRT Scanlines"
                 value={snapshot.postFx.crtScanlineIntensity}
@@ -489,9 +602,65 @@ export function StyleControlsPanel({
               />
             </div>
           </div>
-        )}
+        </AccordionSection>
       </div>
     </aside>
+  );
+}
+
+// --- Collapsible Accordion Wrapper ---
+
+function AccordionSection({
+  id,
+  title,
+  summary,
+  icon,
+  isOpen,
+  onToggle,
+  children,
+}: {
+  readonly id: AccordionSectionId;
+  readonly title: string;
+  readonly summary: string;
+  readonly icon: ReactNode;
+  readonly isOpen: boolean;
+  readonly onToggle: () => void;
+  readonly children: ReactNode;
+}) {
+  const panelId = `inspector-accordion-${id}`;
+  return (
+    <section aria-labelledby={`${panelId}-trigger`}>
+      <button
+        id={`${panelId}-trigger`}
+        type="button"
+        aria-expanded={isOpen}
+        aria-controls={panelId}
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left transition hover:bg-zinc-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--border-focus)]"
+      >
+        <div className="flex items-center gap-2">
+          {icon}
+          <span className="text-xs font-semibold tracking-tight text-zinc-100">
+            {title}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="truncate font-mono text-[10px] text-zinc-500">
+            {summary}
+          </span>
+          <ChevronDown
+            className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-150 ${
+              isOpen ? 'rotate-180' : ''
+            }`}
+          />
+        </div>
+      </button>
+      {isOpen && (
+        <div id={panelId} className="px-3.5 pb-3.5 pt-1">
+          {children}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -556,7 +725,7 @@ function UniformControlField({
             <span className="block text-xs font-medium text-zinc-300">
               {control.label}
             </span>
-            <div className="flex flex-wrap gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-1">
+            <div className="flex flex-wrap gap-1 rounded-lg border border-[var(--border-default)] bg-[var(--bg-card)] p-1">
               {control.options.map((opt) => (
                 <button
                   key={opt.value}
@@ -584,7 +753,7 @@ function UniformControlField({
           <select
             value={strVal}
             onChange={(e) => onChange(e.target.value)}
-            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
+            className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-card)] px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
           >
             {control.options.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -614,7 +783,7 @@ function UniformControlField({
               aria-label={`${control.label} hex`}
               value={colorVal}
               onChange={(e) => onChange(e.target.value)}
-              className="w-20 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-200"
+              className="w-20 rounded border border-[var(--border-default)] bg-[var(--bg-card)] px-2 py-1 font-mono text-xs text-zinc-200"
             />
           </div>
         </div>
@@ -631,7 +800,7 @@ function UniformControlField({
             {control.label}
           </span>
           <div className="grid grid-cols-2 gap-2">
-            <label className="flex items-center gap-1.5 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs">
+            <label className="flex items-center gap-1.5 rounded border border-[var(--border-default)] bg-[var(--bg-card)] px-2 py-1 text-xs">
               <span className="text-zinc-500">X</span>
               <input
                 type="number"
@@ -643,7 +812,7 @@ function UniformControlField({
                 className="w-full bg-transparent font-mono text-zinc-100 focus:outline-none"
               />
             </label>
-            <label className="flex items-center gap-1.5 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs">
+            <label className="flex items-center gap-1.5 rounded border border-[var(--border-default)] bg-[var(--bg-card)] px-2 py-1 text-xs">
               <span className="text-zinc-500">Y</span>
               <input
                 type="number"
@@ -686,7 +855,7 @@ function SimpleSlider({
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs">
         <span className="font-medium text-zinc-300">{label}</span>
-        <span className="font-mono text-[11px] text-zinc-400">
+        <span className="font-mono text-[11px] tabular-nums text-zinc-400">
           {value.toFixed(decimals)}
           {unit ?? ''}
         </span>

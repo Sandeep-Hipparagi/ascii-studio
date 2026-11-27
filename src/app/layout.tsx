@@ -1,7 +1,14 @@
 import type { Metadata } from 'next';
-import { Geist_Mono, JetBrains_Mono } from 'next/font/google';
+import { Geist, Geist_Mono, JetBrains_Mono } from 'next/font/google';
 import type { ReactNode } from 'react';
 import './globals.css';
+
+const geistSans = Geist({
+  subsets: ['latin'],
+  weight: ['400', '500', '600', '700'],
+  variable: '--font-sans-ui',
+  display: 'swap',
+});
 
 const geistMono = Geist_Mono({
   subsets: ['latin'],
@@ -30,10 +37,10 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
   return (
     <html
       lang="en"
-      className={`dark ${geistMono.variable} ${jetbrainsMono.variable}`}
+      className={`dark ${geistSans.variable} ${geistMono.variable} ${jetbrainsMono.variable}`}
     >
       <body
-        className={`${geistMono.variable} ${jetbrainsMono.variable} h-screen w-screen overflow-hidden bg-zinc-950 font-mono text-zinc-100 antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${jetbrainsMono.variable} min-h-screen overflow-x-hidden bg-[var(--bg-void)] font-sans text-[var(--text-primary)] antialiased`}
       >
         {children}
       </body>

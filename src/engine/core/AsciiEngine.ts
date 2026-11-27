@@ -583,6 +583,21 @@ export class AsciiEngine {
     }
   }
 
+  /**
+   * Synchronously renders one frame onto the backing canvas at a specific
+   * timestamp without starting a continuous `requestAnimationFrame` loop.
+   * Used by the shared thumbnail preview pool on `/styles`.
+   */
+  public renderPreviewFrame(elapsedSec: number, dtSec = 1 / 60): boolean {
+    if (this.disposed) return false;
+    this.isPlaying = false;
+    this.cancelLoops();
+    this.elapsedGenSec = elapsedSec;
+    this.frameCounter += 1;
+    this.dirty = false;
+    return this.renderStep(performance.now(), dtSec, true);
+  }
+
   // --- Deterministic Offline / High-DPI Export ---
 
   /**

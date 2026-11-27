@@ -1,13 +1,34 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
-import { PanelRightClose, PanelRightOpen, Terminal } from 'lucide-react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 import { ExportModal } from '../components/studio/ExportModal';
+import { HeaderBar } from '../components/studio/HeaderBar';
 import { StudioViewport } from '../components/studio/StudioViewport';
 import { StyleControlsPanel } from '../components/studio/StyleControlsPanel';
 import { useAsciiEngine } from '../hooks/useAsciiEngine';
-import { styleRegistry } from '../registry';
+import { getStyleById, styleRegistry } from '../registry';
+
+function StyleQuerySync({
+  onSelectStyle,
+}: {
+  readonly onSelectStyle: (styleId: string) => void;
+}) {
+  const searchParams = useSearchParams();
+  const styleParam = searchParams.get('style');
+  const lastAppliedParamRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!styleParam || styleParam === lastAppliedParamRef.current) return;
+    const plugin = getStyleById(styleParam);
+    if (!plugin) return;
+    lastAppliedParamRef.current = plugin.id;
+    onSelectStyle(plugin.id);
+  }, [onSelectStyle, styleParam]);
+
+  return null;
+}
 
 export default function AsciiStudioPage() {
   const {
@@ -56,7 +77,7 @@ export default function AsciiStudioPage() {
     []
   );
 
-  // Global Studio Keyboard Shortcuts: Space (play/pause), Cmd/Ctrl+E (export), 1-9 (styles)
+  // Global Studio Keyboard Shortcuts: Space (play/pause), Cmd/Ctrl+E (export), 1-9 (styles), Escape (mobile drawer)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -70,6 +91,11 @@ export default function AsciiStudioPage() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault();
         setExportOpen((open) => !open);
+        return;
+      }
+
+      if (e.key === 'Escape' && !exportOpen && typeof window !== 'undefined' && window.innerWidth < 768) {
+        setSidebarOpen(false);
         return;
       }
 
@@ -96,40 +122,16 @@ export default function AsciiStudioPage() {
   }, [exportOpen, quickStyleIds, setStyle, togglePlay]);
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
-      {/* Top Studio Header */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-zinc-800/80 bg-zinc-950 px-4">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-400">
-            <Terminal className="h-4 w-4" />
-          </div>
-          <h1 className="text-sm font-semibold tracking-tight text-white">
-            ASCII Studio
-          </h1>
-          <span className="hidden rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 sm:inline-block">
-            WebGL2 · Client-Side
-          </span>
-        </div>
+    <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-panel)] text-[var(--text-primary)]">
+      <Suspense fallback={null}>
+        <StyleQuerySync onSelectStyle={setStyle} />
+      </Suspense>
 
-        <div className="flex items-center gap-2">
-          <span className="hidden font-mono text-[11px] text-zinc-500 md:inline">
-            Space: Play/Pause · 1–9: Styles · ⌘/Ctrl+E: Export
-          </span>
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((s) => !s)}
-            aria-label={sidebarOpen ? 'Collapse inspector' : 'Expand inspector'}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
-          >
-            {sidebarOpen ? (
-              <PanelRightClose className="h-4 w-4" />
-            ) : (
-              <PanelRightOpen className="h-4 w-4" />
-            )}
-            <span className="hidden sm:inline">Inspector</span>
-          </button>
-        </div>
-      </header>
+      <HeaderBar
+        activeRoute="studio"
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen((s) => !s)}
+      />
 
       {/* Responsive Split-Pane Workspace */}
       <main className="relative flex min-h-0 flex-1 overflow-hidden">
@@ -155,9 +157,18 @@ export default function AsciiStudioPage() {
           />
         </section>
 
-        {/* Docked Desktop Inspector / Collapsible Mobile Drawer */}
+        {/* Mobile Inspector Scrim Backdrop */}
         {sidebarOpen && (
-          <div className="absolute inset-y-0 right-0 z-30 w-80 max-w-[88vw] border-l border-zinc-800/80 bg-zinc-950 shadow-2xl md:static md:w-[360px] lg:w-[384px] md:shadow-none">
+          <div
+            aria-hidden="true"
+            onClick={() => setSidebarOpen(false)}
+            className="absolute inset-0 z-20 bg-black/60 backdrop-blur-[1px] md:hidden"
+          />
+        )}
+
+        {/* Docked Desktop Inspector / Collapsible Mobile Slide-Over Drawer */}
+        {sidebarOpen && (
+          <div className="absolute inset-y-0 right-0 z-30 w-80 max-w-[88vw] border-l border-[var(--border-subtle)] bg-[var(--bg-panel)] shadow-2xl md:static md:w-[360px] lg:w-[384px] md:shadow-none">
             <StyleControlsPanel
               snapshot={snapshot}
               onSelectStyle={setStyle}
