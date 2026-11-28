@@ -329,11 +329,20 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
         img.onerror = () => reject(new Error(`Failed to decode image: ${file.name}`));
       });
 
-      const bitmap = await createImageBitmap(img, {
-        resizeWidth: Math.min(img.naturalWidth || MAX_MEDIA_DIM_PX, MAX_MEDIA_DIM_PX),
-        resizeHeight: Math.min(img.naturalHeight || MAX_MEDIA_DIM_PX, MAX_MEDIA_DIM_PX),
-        resizeQuality: 'medium',
-      });
+      // Bounded decode: cap oversized rasters to the 8K per-side ceiling. SVGs
+      // and sources without intrinsic dimensions must skip the resize path —
+      // naturalWidth === 0 would otherwise force an 8192² decode target.
+      const isVector = file.type === 'image/svg+xml';
+      const hasDims = img.naturalWidth > 0 && img.naturalHeight > 0;
+      const oversized = hasDims && (img.naturalWidth > MAX_MEDIA_DIM_PX || img.naturalHeight > MAX_MEDIA_DIM_PX);
+      const bitmap =
+        !isVector && oversized && hasDims
+          ? await createImageBitmap(img, {
+              resizeWidth: Math.min(img.naturalWidth, MAX_MEDIA_DIM_PX),
+              resizeHeight: Math.min(img.naturalHeight, MAX_MEDIA_DIM_PX),
+              resizeQuality: 'medium',
+            })
+          : await createImageBitmap(img);
       engine.setMediaInput(bitmap);
     },
     [revokeObjectUrl, stopWebcamStream]
