@@ -135,6 +135,7 @@ export function StyleControlsPanel({
   });
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCustomRampDraft(snapshot.ramp);
   }, [snapshot.activeStyleId, snapshot.ramp]);
 

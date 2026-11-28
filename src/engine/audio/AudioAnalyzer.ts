@@ -97,6 +97,9 @@ export class AudioAnalyzer {
     await new Promise<void>((resolve, reject) => {
       audio.onloadeddata = () => resolve();
       audio.onerror = () => reject(new Error(`Unable to decode audio file: ${file.name}`));
+    }).catch((err: unknown) => {
+      URL.revokeObjectURL(url);
+      throw err;
     });
 
     const ctx = this.ensureContext();

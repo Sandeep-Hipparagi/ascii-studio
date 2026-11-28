@@ -68,6 +68,8 @@ export default function AsciiStudioPage() {
   // while keeping mobile (< 768px) unobstructed on initial load.
   useEffect(() => {
     if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+      // Viewport-dependent init must stay effect-based to avoid SSG hydration mismatch.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSidebarOpen(true);
     }
   }, []);

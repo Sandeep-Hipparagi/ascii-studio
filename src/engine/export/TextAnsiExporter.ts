@@ -5,6 +5,19 @@
 import type { CellBuffer } from '../core/types';
 
 /**
+ * Neutralizes C0/C1 terminal control characters (including ESC, which would
+ * otherwise smuggle arbitrary SGR/OSC sequences into exported .ans files) and
+ * 7-bit DEL. Printable ASCII and Unicode glyphs pass through untouched.
+ */
+export function safeGlyph(ch: string): string {
+  if (ch.length === 0) return ' ';
+  const code = ch.codePointAt(0) ?? 0x20;
+  if (code >= 0x20 && code < 0x7f) return ch;
+  if (code > 0x009f) return ch;
+  return ' ';
+}
+
+/**
  * Exports the CellBuffer as newline-delimited UTF-8 plain text, preserving
  * trailing spaces and exact `cols x rows` grid dimensions.
  */
@@ -16,7 +29,7 @@ export function exportPlainText(cellBuffer: CellBuffer): string {
     let rowStr = '';
     const rowBase = r * cols;
     for (let c = 0; c < cols; c += 1) {
-      rowStr += glyphs[rowBase + c] ?? ' ';
+      rowStr += safeGlyph(glyphs[rowBase + c] ?? ' ');
     }
     lines[r] = rowStr;
   }
@@ -45,7 +58,7 @@ export function exportAnsiTrueColor(cellBuffer: CellBuffer): string {
     for (let c = 0; c < cols; c += 1) {
       const idx = rowBase + c;
       const p4 = idx * 4;
-      const ch = glyphs[idx] ?? ' ';
+      const ch = safeGlyph(glyphs[idx] ?? ' ');
 
       const fgR = fgRgba[p4] ?? 240;
       const fgG = fgRgba[p4 + 1] ?? 245;

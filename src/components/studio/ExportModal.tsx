@@ -123,6 +123,7 @@ export function ExportModal({ isOpen, onClose, snapshot, onExport }: ExportModal
 
   useEffect(() => {
     if (!isOpen) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setErrorMsg(null);
 
     if (tab === 'text') {
@@ -364,6 +365,7 @@ export function ExportModal({ isOpen, onClose, snapshot, onExport }: ExportModal
             <div className="space-y-4">
               {svgPreviewDataUri && (
                 <div className="overflow-hidden rounded-xl border border-zinc-800 bg-black p-2">
+                  {/* Inline SVG data-URI preview; next/image optimization does not apply. */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={svgPreviewDataUri}

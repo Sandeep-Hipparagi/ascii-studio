@@ -67,6 +67,9 @@ const DEFAULT_AUDIO_STATE: AudioAnalyzerState = {
   rms: 0,
 };
 
+const MAX_MEDIA_FILE_BYTES = 64 * 1024 * 1024; // 64 MB upload ceiling
+const MAX_MEDIA_DIM_PX = 8192; // 8K per-side decode ceiling (main-thread DoS guard)
+
 const SERVER_SNAPSHOT: AsciiEngineSnapshot = {
   sourceKind: 'media',
   activeStyleId: 'classic-density',
@@ -278,6 +281,12 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
       const engine = engineRef.current;
       if (!engine) return;
 
+      if (file.size > MAX_MEDIA_FILE_BYTES) {
+        throw new Error(
+          `File too large (${(file.size / 1048576).toFixed(0)} MB). Maximum is 64 MB.`
+        );
+      }
+
       hasCustomMediaRef.current = true;
       stopWebcamStream();
       revokeObjectUrl();
@@ -294,7 +303,17 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
         video.preload = 'auto';
 
         await new Promise<void>((resolve, reject) => {
-          video.onloadeddata = () => resolve();
+          video.onloadeddata = () => {
+            if (video.videoWidth > MAX_MEDIA_DIM_PX || video.videoHeight > MAX_MEDIA_DIM_PX) {
+              reject(
+                new Error(
+                  `Video resolution ${video.videoWidth}×${video.videoHeight} exceeds the ${MAX_MEDIA_DIM_PX}px per-side limit.`
+                )
+              );
+              return;
+            }
+            resolve();
+          };
           video.onerror = () => reject(new Error(`Failed to decode video: ${file.name}`));
         });
 
@@ -310,7 +329,11 @@ export function useAsciiEngine(initialStyleId = 'classic-density') {
         img.onerror = () => reject(new Error(`Failed to decode image: ${file.name}`));
       });
 
-      const bitmap = await createImageBitmap(img);
+      const bitmap = await createImageBitmap(img, {
+        resizeWidth: Math.min(img.naturalWidth || MAX_MEDIA_DIM_PX, MAX_MEDIA_DIM_PX),
+        resizeHeight: Math.min(img.naturalHeight || MAX_MEDIA_DIM_PX, MAX_MEDIA_DIM_PX),
+        resizeQuality: 'medium',
+      });
       engine.setMediaInput(bitmap);
     },
     [revokeObjectUrl, stopWebcamStream]

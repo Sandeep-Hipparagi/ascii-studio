@@ -201,6 +201,8 @@ export function StylePreviewCanvas({ plugin, active }: StylePreviewCanvasProps) 
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    // Media-query initial read is external-system sync, not derivable state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setReducedMotion(mq.matches);
     const onChange = (e: MediaQueryListEvent) => setReducedMotion(e.matches);
     mq.addEventListener('change', onChange);

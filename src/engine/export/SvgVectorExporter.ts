@@ -9,6 +9,7 @@ import type {
   GlyphAtlasMetrics,
   PaletteConfig,
 } from '../core/types';
+import { safeGlyph } from './TextAnsiExporter';
 
 function escapeXml(text: string): string {
   return text
@@ -104,23 +105,50 @@ export function exportSvg(
   for (let r = 0; r < rows; r += 1) {
     const y = (r * cellH + baselineOffset).toFixed(2);
     const rowBase = r * cols;
-    for (let c = 0; c < cols; c += 1) {
+    let c = 0;
+
+    while (c < cols) {
       const idx = rowBase + c;
-      const ch = glyphs[idx] ?? ' ';
-      if (ch === ' ') continue;
-
       const p4 = idx * 4;
-      const fgA = fgRgba[p4 + 3] ?? 255;
-      if (fgA <= 0) continue;
-
       const fgR = fgRgba[p4] ?? 240;
       const fgG = fgRgba[p4 + 1] ?? 245;
       const fgB = fgRgba[p4 + 2] ?? 240;
+      const fgA = fgRgba[p4 + 3] ?? 255;
+
+      // Run-length merge contiguous same-color glyphs into one <text> node.
+      // `textLength` pins the run to its exact monospace grid span so merged
+      // output stays pixel-identical to the per-glyph layout.
+      if (glyphs[idx] === ' ' || glyphs[idx] === undefined || fgA <= 0) {
+        c += 1;
+        continue;
+      }
+
+      let runEnd = c + 1;
+      let runText = safeGlyph(glyphs[idx] ?? ' ');
+      while (runEnd < cols) {
+        const nIdx = rowBase + runEnd;
+        const n4 = nIdx * 4;
+        const nCh = glyphs[nIdx] ?? ' ';
+        if (
+          nCh === ' ' ||
+          (fgRgba[n4 + 3] ?? 255) <= 0 ||
+          (fgRgba[n4] ?? 240) !== fgR ||
+          (fgRgba[n4 + 1] ?? 245) !== fgG ||
+          (fgRgba[n4 + 2] ?? 240) !== fgB ||
+          (fgRgba[n4 + 3] ?? 255) !== fgA
+        ) {
+          break;
+        }
+        runText += safeGlyph(nCh);
+        runEnd += 1;
+      }
 
       const x = (c * cellW).toFixed(2);
+      const textLength = ((runEnd - c) * cellW).toFixed(2);
       textNodes.push(
-        `<text x="${x}" y="${y}" fill="${rgbaToCss(fgR, fgG, fgB, fgA)}">${escapeXml(ch)}</text>`
+        `<text x="${x}" y="${y}" textLength="${textLength}" lengthAdjust="spacing" fill="${rgbaToCss(fgR, fgG, fgB, fgA)}" xml:space="preserve">${escapeXml(runText)}</text>`
       );
+      c = runEnd;
     }
   }
 

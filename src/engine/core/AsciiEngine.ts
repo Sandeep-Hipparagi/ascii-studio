@@ -1332,7 +1332,28 @@ void main() {
     const texColorA = gl.createTexture();
     const texColorB = gl.createTexture();
 
-    if (!vao || !vbo || !ubo || !fboA || !fboB || !texA || !texB || !texColorA || !texColorB) return;
+    if (!vao || !vbo || !ubo || !fboA || !fboB || !texA || !texB || !texColorA || !texColorB) {
+      const partial: (WebGLBuffer | WebGLTexture | WebGLFramebuffer | WebGLVertexArrayObject)[] = [
+        vao,
+        vbo,
+        ubo,
+        fboA,
+        fboB,
+        texA,
+        texB,
+        texColorA,
+        texColorB,
+      ];
+      for (const obj of partial) {
+        if (!obj) continue;
+        if (obj instanceof WebGLBuffer) gl.deleteBuffer(obj);
+        else if (obj instanceof WebGLTexture) gl.deleteTexture(obj);
+        else if (obj instanceof WebGLFramebuffer) gl.deleteFramebuffer(obj);
+        else gl.deleteVertexArray(obj);
+      }
+      gl.deleteProgram(program);
+      return;
+    }
 
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
@@ -1424,7 +1445,10 @@ void main() {
         gl.uniform2f(loc, Number(value[0] ?? 0), Number(value[1] ?? 0));
       } else if (control.kind === 'color' && typeof value === 'string') {
         const clean = value.replace('#', '');
-        const hex = parseInt(clean.length === 6 ? clean : 'ffffff', 16);
+        const hex = Number.parseInt(
+          /^[0-9a-fA-F]{6}$/.test(clean) ? clean : 'ffffff',
+          16
+        );
         gl.uniform3f(
           loc,
           ((hex >> 16) & 0xff) / 255,
